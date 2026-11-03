@@ -1,0 +1,60 @@
+name: webcam-test release
+
+on:
+  push:
+    paths:
+      - "webcam-test/**"
+      - ".github/workflows/webcam-test-release.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: webcam-test
+    env:
+      VERSION: 1.0.${{ github.run_number }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Publish single-file exe
+        run: >
+          dotnet publish WebcamTest.csproj
+          -c Release
+          -r win-x64
+          --self-contained true
+          -p:PublishSingleFile=true
+          -p:IncludeNativeLibrariesForSelfExtract=true
+          -p:EnableCompressionInSingleFile=true
+          -p:DebugType=none
+          -p:Version=${{ env.VERSION }}
+          -o publish
+
+      - name: Zip
+        shell: pwsh
+        run: Compress-Archive -Path publish/* -DestinationPath WebcamTest-win-x64.zip
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: webcam-test-v${{ env.VERSION }}
+          name: Webcam Test ${{ env.VERSION }}
+          target_commitish: ${{ github.sha }}
+          body: |
+            Build dari commit ${{ github.sha }} (branch `${{ github.ref_name }}`).
+
+            Cara pakai: unduh `WebcamTest.exe`, lalu klik dua kali. Tidak perlu memasang .NET.
+            Windows SmartScreen mungkin menampilkan peringatan karena exe ini tidak ditandatangani: pilih "More info" lalu "Run anyway".
+            Foto tersimpan di folder `Pictures\WebcamTest`.
+          files: |
+            webcam-test/publish/WebcamTest.exe
+            webcam-test/WebcamTest-win-x64.zip
