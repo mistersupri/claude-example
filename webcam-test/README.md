@@ -28,7 +28,7 @@ Foto tersimpan di `%USERPROFILE%\Pictures\WebcamTest\foto-YYYYMMDD-HHMMSS-mmm.jp
 Aplikasi ini memakai API kamera resmi Windows (`MediaCapture`), sama seperti aplikasi Camera bawaan, dan memberi pesan yang spesifik:
 
 - **Windows menolak akses kamera**: Settings > Privacy & security > Camera, nyalakan **Camera access** dan **Let desktop apps access your camera**.
-- **Tidak merespons saat dibuka (15 detik)** atau **terbuka tetapi tidak ada gambar (10 detik)**: restart layanan **Windows Camera Frame Server** di `services.msc`, dan tutup aplikasi lain yang memakai kamera.
+- **Tidak merespons saat dibuka (15 detik)** atau **terbuka tetapi tidak ada gambar**: aplikasi menunggu 6 detik, lalu otomatis mencoba cara lain (bagi pakai, kendali penuh, format asli kamera) sebelum menyerah: restart layanan **Windows Camera Frame Server** di `services.msc`, dan tutup aplikasi lain yang memakai kamera.
 - **Gambar masih hitam setelah 6 detik**: cek penutup lensa atau tombol kamera di keyboard, matikan efek kamera (Windows Studio Effects, aplikasi kamera pabrikan) di Settings > Bluetooth & devices > Cameras, atau pilih kamera lain di daftar.
 - Tekan **Info perangkat** untuk melihat catatan sesi, lalu salin dan kirim saat melapor masalah.
 

@@ -18,9 +18,12 @@ internal sealed class MainForm : Form
     }
 
     private static readonly TimeSpan OpenTimeout = TimeSpan.FromSeconds(15);
-    private static readonly TimeSpan FirstFrameTimeout = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan FirstFrameTimeout = TimeSpan.FromSeconds(6);
     private static readonly TimeSpan BlackHintDelay = TimeSpan.FromSeconds(6);
     private const int MaxLogLines = 60;
+
+    // Tried in this order when a camera opens but sends no pictures.
+    private static readonly CaptureMode[] Modes = Enum.GetValues<CaptureMode>();
 
     private static readonly ImageCodecInfo JpegCodec =
         ImageCodecInfo.GetImageEncoders().First(c => c.FormatID == ImageFormat.Jpeg.Guid);
@@ -58,6 +61,8 @@ internal sealed class MainForm : Form
     private readonly List<string> sessionLog = new();
 
     private CameraSession? session;
+    private CameraChoice? currentChoice;
+    private int currentMode;
     private CancellationTokenSource? startCts;
     private CameraState state = CameraState.Idle;
     private string overlayText = "";
@@ -236,15 +241,18 @@ internal sealed class MainForm : Form
         }
 
         await StopCameraAsync();
-        await StartCameraAsync();
+        currentChoice = cameraList.SelectedItem as CameraChoice;
+        await StartCameraAsync(0);
     }
 
-    private async Task StartCameraAsync()
+    private async Task StartCameraAsync(int modeIndex)
     {
-        if (cameraList.SelectedItem is not CameraChoice choice)
+        if (currentChoice is not { } choice)
         {
             return;
         }
+        currentMode = modeIndex;
+        var mode = Modes[modeIndex];
 
         SetState(CameraState.Opening);
         firstFrameAt = null;
@@ -256,8 +264,8 @@ internal sealed class MainForm : Form
         startCts = cts;
         var token = cts.Token;
 
-        Log($"Membuka {choice}");
-        var start = CameraSession.StartAsync(choice.Group, OnFrame);
+        Log($"Membuka {choice} ({CameraSession.Describe(mode)})");
+        var start = CameraSession.StartAsync(choice.Group, mode, OnFrame);
         try
         {
             var finished = await Task.WhenAny(start, Task.Delay(OpenTimeout, token));
@@ -284,7 +292,7 @@ internal sealed class MainForm : Form
 
             session = started;
             sessionStartedAt = DateTime.UtcNow;
-            Log($"{choice}: terbuka, menunggu gambar");
+            Log($"{choice}: terbuka ({started.FormatInfo}), menunggu gambar");
         }
         catch (UnauthorizedAccessException)
         {
@@ -373,13 +381,25 @@ internal sealed class MainForm : Form
             var now = DateTime.UtcNow;
             if (state == CameraState.Opening && session is not null && now - sessionStartedAt > FirstFrameTimeout)
             {
-                Log($"{activeCameraName}: terbuka tetapi tidak ada gambar dalam {FirstFrameTimeout.TotalSeconds:0} detik");
+                var diagnostics = session.Diagnostics;
+                Log($"{activeCameraName}: tidak ada gambar dalam {FirstFrameTimeout.TotalSeconds:0} detik " +
+                    $"({CameraSession.Describe(Modes[currentMode])}) [{diagnostics}]");
                 await StopCameraAsync();
+                if (state != CameraState.Opening)
+                {
+                    return;
+                }
+                if (currentMode + 1 < Modes.Length)
+                {
+                    await StartCameraAsync(currentMode + 1);
+                    return;
+                }
                 SetState(CameraState.Error,
-                    $"{activeCameraName} terbuka tetapi tidak mengirim gambar.\n\n" +
+                    $"{activeCameraName} terbuka tetapi tidak mengirim gambar,\n" +
+                    "walau sudah dicoba dengan 3 cara membaca kamera.\n\n" +
+                    $"Rincian: {diagnostics}\n\n" +
                     "Coba restart layanan Windows Camera Frame Server (services.msc),\n" +
-                    "matikan efek kamera (Settings > Bluetooth & devices > Cameras),\n" +
-                    "atau pilih kamera lain.");
+                    "atau matikan efek kamera (Settings > Bluetooth & devices > Cameras).");
             }
             else if (state == CameraState.Running && !blackHintShown && firstFrameAt is { } first)
             {
