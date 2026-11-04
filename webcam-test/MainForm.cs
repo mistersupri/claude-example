@@ -1,9 +1,9 @@
 using System.Diagnostics;
+using System.Drawing.Imaging;
 using System.Management;
+using System.Runtime.InteropServices;
 using System.Text;
-using OpenCvSharp;
-using OpenCvSharp.Extensions;
-using Size = System.Drawing.Size;
+using Windows.Media.Capture.Frames;
 
 namespace WebcamTest;
 
@@ -11,28 +11,24 @@ internal sealed class MainForm : Form
 {
     private enum CameraState { Idle, Opening, Running, Error }
 
-    private const int CameraSlots = 4;
-    private const int MaxEmptyReads = 50;
-    private const int WarmupFrames = 60;
-    private const double BlackThreshold = 3.0;
-    private static readonly TimeSpan AttemptTimeout = TimeSpan.FromSeconds(8);
-
-    // DirectShow first: Media Foundation can block forever while opening on some drivers.
-    // The MJPG 720p variant asks the driver for the compressed format most camera apps use,
-    // which works on some cameras whose default uncompressed format shows black.
-    private static readonly (VideoCaptureAPIs Api, string Name, bool Mjpg)[] Backends =
+    private sealed record CameraChoice(MediaFrameSourceGroup Group, bool HasColor)
     {
-        (VideoCaptureAPIs.DSHOW, "DirectShow", false),
-        (VideoCaptureAPIs.DSHOW, "DirectShow MJPG 720p", true),
-        (VideoCaptureAPIs.MSMF, "Media Foundation", false),
-    };
+        public override string ToString() =>
+            HasColor ? Group.DisplayName : $"{Group.DisplayName} (inframerah)";
+    }
 
-    private enum Outcome { Ok, NotOpened, NoFrames, Black, Timeout, Cancelled }
+    private static readonly TimeSpan OpenTimeout = TimeSpan.FromSeconds(15);
+    private static readonly TimeSpan FirstFrameTimeout = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan BlackHintDelay = TimeSpan.FromSeconds(6);
+    private const int MaxLogLines = 60;
+
+    private static readonly ImageCodecInfo JpegCodec =
+        ImageCodecInfo.GetImageEncoders().First(c => c.FormatID == ImageFormat.Jpeg.Guid);
 
     private readonly ComboBox cameraList = new()
     {
         DropDownStyle = ComboBoxStyle.DropDownList,
-        Width = 140,
+        Width = 300,
         Margin = new Padding(0, 6, 12, 0),
         AccessibleName = "Pilih kamera",
     };
@@ -55,18 +51,25 @@ internal sealed class MainForm : Form
         TextAlign = ContentAlignment.MiddleLeft,
     };
 
+    private readonly System.Windows.Forms.Timer watchdog = new() { Interval = 1000 };
     private readonly string photoFolder = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.MyPictures), "WebcamTest");
-
     private readonly Font overlayFont = new("Segoe UI", 12f);
-    private readonly object frameLock = new();
-    private Mat? lastFrame;
-    private CancellationTokenSource? captureCts;
-    private Task? captureLoop;
+    private readonly List<string> sessionLog = new();
+
+    private CameraSession? session;
+    private CancellationTokenSource? startCts;
     private CameraState state = CameraState.Idle;
     private string overlayText = "";
+    private string activeCameraName = "";
     private string? lastSavedPath;
-    private volatile string lastAttemptLog = "";
+    private bool cameraListLoaded;
+    private bool watchdogBusy;
+    private bool blackHintShown;
+    private DateTime sessionStartedAt;
+    private DateTime? firstFrameAt;
+    private DateTime? lastNonBlackAt;
+    private int uiPending;
 
     public MainForm()
     {
@@ -75,13 +78,6 @@ internal sealed class MainForm : Form
         MinimumSize = new Size(560, 420);
         StartPosition = FormStartPosition.CenterScreen;
         AutoScaleMode = AutoScaleMode.Dpi;
-
-        cameraList.Items.Add("Otomatis (cari sendiri)");
-        for (var i = 0; i < CameraSlots; i++)
-        {
-            cameraList.Items.Add($"Kamera {i + 1}");
-        }
-        cameraList.SelectedIndex = 0;
 
         var toolbar = new FlowLayoutPanel
         {
@@ -115,8 +111,10 @@ internal sealed class MainForm : Form
         captureButton.Click += (_, _) => CapturePhoto();
         openFolderButton.Click += (_, _) => OpenPhotoFolder();
         infoButton.Click += async (_, _) => await ShowDeviceInfoAsync();
+        watchdog.Tick += async (_, _) => await WatchdogTickAsync();
         preview.Paint += DrawOverlay;
         preview.Resize += (_, _) => preview.Invalidate();
+        Shown += async (_, _) => await LoadCamerasAsync();
 
         SetState(CameraState.Idle);
     }
@@ -130,20 +128,72 @@ internal sealed class MainForm : Form
         Margin = new Padding(0, 0, 8, 0),
     };
 
+    private void Log(string line)
+    {
+        sessionLog.Add($"{DateTime.Now:HH:mm:ss} {line}");
+        if (sessionLog.Count > MaxLogLines)
+        {
+            sessionLog.RemoveAt(0);
+        }
+    }
+
+    private async Task LoadCamerasAsync()
+    {
+        try
+        {
+            var groups = await MediaFrameSourceGroup.FindAllAsync();
+            var choices = groups
+                .Select(g => new CameraChoice(g, g.SourceInfos.Any(i => i.SourceKind == MediaFrameSourceKind.Color)))
+                .OrderByDescending(c => c.HasColor)
+                .ToList();
+
+            cameraList.Items.Clear();
+            foreach (var choice in choices)
+            {
+                cameraList.Items.Add(choice);
+            }
+            if (choices.Count > 0)
+            {
+                cameraList.SelectedIndex = 0;
+            }
+            Log($"Ditemukan {choices.Count} kamera");
+        }
+        catch (Exception ex) when (ex is COMException or UnauthorizedAccessException)
+        {
+            Log($"Gagal membaca daftar kamera: {ex.Message}");
+        }
+
+        cameraListLoaded = true;
+        if (state == CameraState.Idle)
+        {
+            SetState(CameraState.Idle);
+        }
+    }
+
     private void SetState(CameraState newState, string? message = null)
     {
         state = newState;
         var running = newState == CameraState.Running;
         var busy = newState is CameraState.Opening or CameraState.Running;
+        var hasCameras = cameraList.Items.Count > 0;
 
-        cameraList.Enabled = !busy;
+        cameraList.Enabled = !busy && hasCameras;
+        toggleButton.Enabled = busy || hasCameras;
         toggleButton.Text = busy ? "&Matikan kamera" : "&Nyalakan kamera";
         captureButton.Enabled = running;
 
+        if (running)
+        {
+            activeCameraName = message ?? activeCameraName;
+        }
+
         overlayText = newState switch
         {
+            CameraState.Idle when !cameraListLoaded => "Mencari daftar kamera...",
+            CameraState.Idle when !hasCameras =>
+                "Windows tidak menemukan kamera.\nCek sambungan kamera dan izin kamera di\nSettings > Privacy & security > Camera.",
             CameraState.Idle => "Kamera belum menyala.\nPilih kamera, lalu tekan \"Nyalakan kamera\".",
-            CameraState.Opening => "Mencari kamera yang menghasilkan gambar...",
+            CameraState.Opening => "Membuka kamera...",
             CameraState.Error => message ?? "Kamera tidak bisa dipakai.",
             _ => "",
         };
@@ -152,10 +202,19 @@ internal sealed class MainForm : Form
         {
             CameraState.Idle => $"Foto disimpan ke {photoFolder}",
             CameraState.Opening => "Menunggu kamera. Tekan \"Matikan kamera\" untuk membatalkan.",
-            CameraState.Running => $"Kamera aktif ({message}). Tekan Enter atau \"Ambil foto\" untuk menyimpan gambar.",
-            CameraState.Error => "Terjadi masalah dengan kamera. Coba kamera lain atau tutup aplikasi yang sedang memakainya.",
+            CameraState.Running => RunningStatus(),
+            CameraState.Error => "Terjadi masalah dengan kamera. Baca pesan di layar, atau tekan Info perangkat.",
             _ => "",
         };
+
+        if (busy)
+        {
+            watchdog.Start();
+        }
+        else
+        {
+            watchdog.Stop();
+        }
 
         if (!running)
         {
@@ -163,6 +222,9 @@ internal sealed class MainForm : Form
         }
         preview.Invalidate();
     }
+
+    private string RunningStatus() =>
+        $"Kamera aktif ({activeCameraName}). Tekan Enter atau \"Ambil foto\" untuk menyimpan gambar.";
 
     private async Task ToggleCameraAsync()
     {
@@ -174,222 +236,167 @@ internal sealed class MainForm : Form
         }
 
         await StopCameraAsync();
-        var index = cameraList.SelectedIndex - 1; // -1 = automatic
-        SetState(CameraState.Opening);
-
-        captureCts = new CancellationTokenSource();
-        var token = captureCts.Token;
-        captureLoop = Task.Run(() => RunCapture(index, token), token);
+        await StartCameraAsync();
     }
 
-    private async Task StopCameraAsync()
+    private async Task StartCameraAsync()
     {
-        captureCts?.Cancel();
-        if (captureLoop is not null)
+        if (cameraList.SelectedItem is not CameraChoice choice)
         {
-            try
-            {
-                await captureLoop;
-            }
-            catch (OperationCanceledException)
-            {
-            }
-        }
-        captureCts?.Dispose();
-        captureCts = null;
-        captureLoop = null;
-
-        lock (frameLock)
-        {
-            lastFrame?.Dispose();
-            lastFrame = null;
-        }
-    }
-
-    // Runs on a worker thread; every UI change goes through PostToUi.
-    private void RunCapture(int selected, CancellationToken token)
-    {
-        var (capture, cameraIndex, backendName, log) = FindWorkingCamera(selected, token);
-        using var ownedCapture = capture;
-        lastAttemptLog = string.Join("\n", log);
-        if (capture is null)
-        {
-            if (!token.IsCancellationRequested)
-            {
-                var message = "Tidak ada kamera yang menghasilkan gambar.\n\n" +
-                    string.Join("\n", log) +
-                    "\n\nCek penutup lensa atau tombol kamera di keyboard, dan izin kamera di\n" +
-                    "Settings > Privacy & security > Camera. Tutup juga aplikasi lain yang memakai kamera.";
-                PostToUi(() => SetState(CameraState.Error, message));
-            }
             return;
         }
 
-        var label = $"Kamera {cameraIndex + 1}, {backendName}";
-        using var frame = new Mat();
-        var emptyReads = 0;
+        SetState(CameraState.Opening);
+        firstFrameAt = null;
+        lastNonBlackAt = null;
+        blackHintShown = false;
+        activeCameraName = choice.ToString();
 
-        while (!token.IsCancellationRequested)
-        {
-            if (!capture.Read(frame) || frame.Empty())
-            {
-                if (++emptyReads >= MaxEmptyReads)
-                {
-                    PostToUi(() => SetState(CameraState.Error,
-                        $"{label} berhenti mengirim gambar.\nCoba nyalakan ulang atau pilih kamera lain."));
-                    return;
-                }
-                Thread.Sleep(20);
-                continue;
-            }
+        var cts = new CancellationTokenSource();
+        startCts = cts;
+        var token = cts.Token;
 
-            emptyReads = 0;
-            lock (frameLock)
-            {
-                lastFrame?.Dispose();
-                lastFrame = frame.Clone();
-            }
-
-            var bitmap = frame.ToBitmap();
-            PostToUi(() =>
-            {
-                if (token.IsCancellationRequested)
-                {
-                    bitmap.Dispose();
-                    return;
-                }
-                if (state == CameraState.Opening)
-                {
-                    SetState(CameraState.Running, label);
-                }
-                var old = preview.Image;
-                preview.Image = bitmap;
-                old?.Dispose();
-            });
-        }
-    }
-
-    // Tries every camera index (or only the chosen one) with every backend, and keeps the first
-    // one that delivers a non-black frame. Each attempt has a time limit so a driver that hangs
-    // (typically the infrared camera used by Windows Hello) cannot freeze the search; after a
-    // timeout the search skips to the next camera number.
-    private (VideoCapture? Capture, int Index, string Backend, List<string> Log) FindWorkingCamera(
-        int selected, CancellationToken token)
-    {
-        var indices = selected < 0 ? Enumerable.Range(0, CameraSlots).ToArray() : new[] { selected };
-        var log = new List<string>();
-
-        foreach (var index in indices)
-        {
-            foreach (var (api, name, mjpg) in Backends)
-            {
-                if (token.IsCancellationRequested)
-                {
-                    return (null, index, "", log);
-                }
-                PostToUi(() =>
-                {
-                    if (state == CameraState.Opening)
-                    {
-                        statusLabel.Text = $"Mencoba Kamera {index + 1} lewat {name} (maks. {AttemptTimeout.TotalSeconds:0} detik)...";
-                    }
-                });
-
-                var (outcome, capture) = TryOpen(index, api, mjpg, token);
-                log.Add($"Kamera {index + 1} / {name}: {Describe(outcome)}");
-                if (outcome == Outcome.Ok)
-                {
-                    return (capture, index, name, log);
-                }
-                if (outcome == Outcome.Timeout)
-                {
-                    // The abandoned attempt still holds this camera, so more tries on it would hang too.
-                    // Move on to the next camera number instead.
-                    log.Add($"Kamera {index + 1}: percobaan lain dilewati, lanjut ke kamera berikutnya");
-                    break;
-                }
-            }
-        }
-        return (null, -1, "", log);
-    }
-
-    private static string Describe(Outcome outcome) => outcome switch
-    {
-        Outcome.Ok => "berhasil",
-        Outcome.NotOpened => "tidak bisa dibuka",
-        Outcome.NoFrames => "terbuka tetapi tidak mengirim gambar",
-        Outcome.Black => "hanya gambar hitam",
-        Outcome.Timeout => "tidak merespons (kamera IR sering begini)",
-        _ => "dibatalkan",
-    };
-
-    private static (Outcome, VideoCapture?) TryOpen(int index, VideoCaptureAPIs api, bool mjpg, CancellationToken token)
-    {
-        var attempt = Task.Run(() => OpenAndWarmUp(index, api, mjpg, token));
+        Log($"Membuka {choice}");
+        var start = CameraSession.StartAsync(choice.Group, OnFrame);
         try
         {
-            if (attempt.Wait(AttemptTimeout, token))
+            var finished = await Task.WhenAny(start, Task.Delay(OpenTimeout, token));
+            if (finished != start)
             {
-                return attempt.Result;
+                ReleaseWhenStartFinishes(start);
+                if (!token.IsCancellationRequested)
+                {
+                    Log($"{choice}: tidak merespons dalam {OpenTimeout.TotalSeconds:0} detik");
+                    SetState(CameraState.Error,
+                        $"{choice} tidak merespons saat dibuka.\n\n" +
+                        "Coba restart layanan Windows Camera Frame Server (services.msc),\n" +
+                        "tutup aplikasi lain yang memakai kamera, atau pilih kamera lain.");
+                }
+                return;
             }
-        }
-        catch (OperationCanceledException)
-        {
-            // Falls through to the cleanup below.
-        }
 
-        // The native call is still blocked and cannot be aborted. Release the camera whenever it returns.
-        attempt.ContinueWith(
-            t => t.Result.Item2?.Dispose(),
-            TaskContinuationOptions.OnlyOnRanToCompletion);
-        return (token.IsCancellationRequested ? Outcome.Cancelled : Outcome.Timeout, null);
+            var started = await start;
+            if (token.IsCancellationRequested || startCts != cts)
+            {
+                started.Dispose();
+                return;
+            }
+
+            session = started;
+            sessionStartedAt = DateTime.UtcNow;
+            Log($"{choice}: terbuka, menunggu gambar");
+        }
+        catch (UnauthorizedAccessException)
+        {
+            Log($"{choice}: akses kamera ditolak");
+            SetState(CameraState.Error,
+                "Windows menolak akses kamera untuk aplikasi ini.\n\n" +
+                "Buka Settings > Privacy & security > Camera, lalu nyalakan\n" +
+                "\"Camera access\" dan \"Let desktop apps access your camera\".");
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            Log($"{choice}: gagal, {ex.Message}");
+            SetState(CameraState.Error, $"{choice} tidak bisa dibuka.\n\n{ex.Message}");
+        }
     }
 
-    // Cameras often send a few black frames while the sensor warms up, hence WarmupFrames reads.
-    private static (Outcome, VideoCapture?) OpenAndWarmUp(int index, VideoCaptureAPIs api, bool mjpg, CancellationToken token)
+    // A start that was abandoned (timeout or cancel) may still finish later; close it then.
+    private static void ReleaseWhenStartFinishes(Task<CameraSession> start) =>
+        start.ContinueWith(t => t.Result.Dispose(), TaskContinuationOptions.OnlyOnRanToCompletion);
+
+    private async Task StopCameraAsync()
     {
-        var capture = new VideoCapture(index, api);
-        if (!capture.IsOpened())
-        {
-            capture.Dispose();
-            return (Outcome.NotOpened, null);
-        }
-        if (mjpg)
-        {
-            capture.Set(VideoCaptureProperties.FourCC, VideoWriter.FourCC('M', 'J', 'P', 'G'));
-            capture.Set(VideoCaptureProperties.FrameWidth, 1280);
-            capture.Set(VideoCaptureProperties.FrameHeight, 720);
-        }
+        startCts?.Cancel();
+        startCts = null;
 
-        using var frame = new Mat();
-        var gotFrame = false;
-        for (var i = 0; i < WarmupFrames; i++)
+        var current = session;
+        session = null;
+        if (current is not null)
         {
-            if (token.IsCancellationRequested)
-            {
-                capture.Dispose();
-                return (Outcome.Cancelled, null);
-            }
-            if (!capture.Read(frame) || frame.Empty())
-            {
-                Thread.Sleep(20);
-                continue;
-            }
-            gotFrame = true;
-            if (!IsBlack(frame))
-            {
-                return (Outcome.Ok, capture);
-            }
+            await current.StopAsync();
         }
-
-        capture.Dispose();
-        return (gotFrame ? Outcome.Black : Outcome.NoFrames, null);
+        ClearPreview();
     }
 
-    private static bool IsBlack(Mat frame)
+    // Runs on a thread-pool thread; the bitmap now belongs to this method.
+    private void OnFrame(Bitmap bitmap, bool black)
     {
-        var mean = Cv2.Mean(frame);
-        return mean.Val0 + mean.Val1 + mean.Val2 < BlackThreshold;
+        // Skip frames while the UI has not yet shown the previous one.
+        if (Interlocked.Exchange(ref uiPending, 1) == 1)
+        {
+            bitmap.Dispose();
+            return;
+        }
+
+        PostToUi(() =>
+        {
+            Interlocked.Exchange(ref uiPending, 0);
+            if (state is not (CameraState.Opening or CameraState.Running))
+            {
+                bitmap.Dispose();
+                return;
+            }
+
+            var now = DateTime.UtcNow;
+            firstFrameAt ??= now;
+            if (!black)
+            {
+                lastNonBlackAt = now;
+                if (blackHintShown)
+                {
+                    blackHintShown = false;
+                    statusLabel.Text = RunningStatus();
+                }
+            }
+            if (state == CameraState.Opening)
+            {
+                Log($"{activeCameraName}: gambar pertama diterima{(black ? " (hitam)" : "")}");
+                SetState(CameraState.Running, activeCameraName);
+            }
+
+            var old = preview.Image;
+            preview.Image = bitmap;
+            old?.Dispose();
+        });
+    }
+
+    private async Task WatchdogTickAsync()
+    {
+        if (watchdogBusy)
+        {
+            return;
+        }
+        watchdogBusy = true;
+        try
+        {
+            var now = DateTime.UtcNow;
+            if (state == CameraState.Opening && session is not null && now - sessionStartedAt > FirstFrameTimeout)
+            {
+                Log($"{activeCameraName}: terbuka tetapi tidak ada gambar dalam {FirstFrameTimeout.TotalSeconds:0} detik");
+                await StopCameraAsync();
+                SetState(CameraState.Error,
+                    $"{activeCameraName} terbuka tetapi tidak mengirim gambar.\n\n" +
+                    "Coba restart layanan Windows Camera Frame Server (services.msc),\n" +
+                    "matikan efek kamera (Settings > Bluetooth & devices > Cameras),\n" +
+                    "atau pilih kamera lain.");
+            }
+            else if (state == CameraState.Running && !blackHintShown && firstFrameAt is { } first)
+            {
+                var lastGood = lastNonBlackAt ?? first;
+                if (now - lastGood > BlackHintDelay)
+                {
+                    blackHintShown = true;
+                    Log($"{activeCameraName}: gambar masih hitam");
+                    statusLabel.Text =
+                        "Gambar masih hitam. Cek penutup lensa, matikan efek kamera (Windows Studio Effects), atau pilih kamera lain.";
+                }
+            }
+        }
+        finally
+        {
+            watchdogBusy = false;
+        }
     }
 
     private void PostToUi(Action action)
@@ -410,34 +417,26 @@ internal sealed class MainForm : Form
 
     private void CapturePhoto()
     {
-        Mat? snapshot;
-        lock (frameLock)
-        {
-            snapshot = lastFrame?.Clone();
-        }
-
-        if (snapshot is null)
+        if (preview.Image is not Bitmap current)
         {
             statusLabel.Text = "Belum ada gambar dari kamera. Tunggu sebentar lalu coba lagi.";
             return;
         }
 
-        using (snapshot)
+        try
         {
-            try
-            {
-                Directory.CreateDirectory(photoFolder);
-                var path = Path.Combine(photoFolder, $"foto-{DateTime.Now:yyyyMMdd-HHmmss-fff}.jpg");
-                // ImEncode + File.WriteAllBytes instead of ImWrite: ImWrite fails on non-ASCII Windows paths.
-                Cv2.ImEncode(".jpg", snapshot, out var bytes, new ImageEncodingParam(ImwriteFlags.JpegQuality, 95));
-                File.WriteAllBytes(path, bytes);
-                lastSavedPath = path;
-                statusLabel.Text = $"Foto tersimpan: {path}";
-            }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or OpenCVException)
-            {
-                statusLabel.Text = $"Gagal menyimpan foto: {ex.Message}";
-            }
+            Directory.CreateDirectory(photoFolder);
+            var path = Path.Combine(photoFolder, $"foto-{DateTime.Now:yyyyMMdd-HHmmss-fff}.jpg");
+            using var copy = new Bitmap(current);
+            using var parameters = new EncoderParameters(1);
+            parameters.Param[0] = new EncoderParameter(System.Drawing.Imaging.Encoder.Quality, 95L);
+            copy.Save(path, JpegCodec, parameters);
+            lastSavedPath = path;
+            statusLabel.Text = $"Foto tersimpan: {path}";
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ExternalException)
+        {
+            statusLabel.Text = $"Gagal menyimpan foto: {ex.Message}";
         }
     }
 
@@ -460,25 +459,36 @@ internal sealed class MainForm : Form
     private async Task ShowDeviceInfoAsync()
     {
         infoButton.Enabled = false;
+        var previousStatus = statusLabel.Text;
         statusLabel.Text = "Membaca daftar perangkat...";
+
+        var cameras = cameraList.Items.Count == 0
+            ? "(tidak ada)"
+            : string.Join("\n", cameraList.Items.Cast<CameraChoice>().Select(c =>
+                $"- {c.Group.DisplayName}: aliran {string.Join(", ", c.Group.SourceInfos.Select(i => i.SourceKind))}"));
+        var log = sessionLog.Count == 0 ? "(belum ada)" : string.Join("\n", sessionLog);
+
         try
         {
-            var text = await Task.Run(BuildDeviceInfo);
+            var text = await Task.Run(() => BuildDeviceInfo(cameras, log));
             ShowTextDialog("Info perangkat", text);
         }
         finally
         {
             infoButton.Enabled = true;
-            statusLabel.Text = state == CameraState.Running ? statusLabel.Text : $"Foto disimpan ke {photoFolder}";
+            statusLabel.Text = previousStatus;
         }
     }
 
-    private string BuildDeviceInfo()
+    private static string BuildDeviceInfo(string cameras, string log)
     {
         var sb = new StringBuilder();
         sb.AppendLine($"Windows: {Environment.OSVersion.VersionString}");
         sb.AppendLine();
-        sb.AppendLine("Kamera yang dikenal Windows:");
+        sb.AppendLine("Kamera menurut Windows MediaCapture (dipakai aplikasi ini):");
+        sb.AppendLine(cameras);
+        sb.AppendLine();
+        sb.AppendLine("Perangkat kamera di Device Manager:");
         AppendQuery(sb,
             "SELECT Name, PNPClass, Status FROM Win32_PnPEntity WHERE PNPClass = 'Camera' OR PNPClass = 'Image'",
             o => $"- {o["Name"]} [{o["PNPClass"]}, status: {o["Status"]}]");
@@ -488,10 +498,8 @@ internal sealed class MainForm : Form
             "SELECT Name, DriverVersion FROM Win32_VideoController",
             o => $"- {o["Name"]} (driver {o["DriverVersion"]})");
         sb.AppendLine();
-        sb.AppendLine("Hasil percobaan membuka kamera yang terakhir:");
-        sb.AppendLine(lastAttemptLog.Length == 0 ? "(belum ada, tekan Nyalakan kamera dulu)" : lastAttemptLog);
-        sb.AppendLine();
-        sb.AppendLine("Catatan: kamera berlabel IR (inframerah, untuk Windows Hello) biasanya hanya menghasilkan gambar hitam.");
+        sb.AppendLine("Catatan sesi ini:");
+        sb.AppendLine(log);
         return sb.ToString();
     }
 
@@ -513,7 +521,7 @@ internal sealed class MainForm : Form
                 sb.AppendLine("(tidak ada)");
             }
         }
-        catch (Exception ex) when (ex is ManagementException or UnauthorizedAccessException or System.Runtime.InteropServices.COMException)
+        catch (Exception ex) when (ex is ManagementException or UnauthorizedAccessException or COMException)
         {
             sb.AppendLine($"(gagal membaca: {ex.Message})");
         }
@@ -525,7 +533,7 @@ internal sealed class MainForm : Form
         using var dialog = new Form
         {
             Text = title,
-            ClientSize = new Size(680, 440),
+            ClientSize = new Size(700, 460),
             StartPosition = FormStartPosition.CenterParent,
             FormBorderStyle = FormBorderStyle.FixedDialog,
             MinimizeBox = false,
@@ -552,7 +560,7 @@ internal sealed class MainForm : Form
                 Clipboard.SetText(text);
                 copyButton.Text = "Tersalin";
             }
-            catch (System.Runtime.InteropServices.ExternalException)
+            catch (ExternalException)
             {
                 copyButton.Text = "Gagal menyalin, blok teks lalu Ctrl+C";
             }
@@ -596,19 +604,10 @@ internal sealed class MainForm : Form
 
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
-        captureCts?.Cancel();
-        try
-        {
-            captureLoop?.Wait(TimeSpan.FromSeconds(2));
-        }
-        catch (AggregateException)
-        {
-        }
-        lock (frameLock)
-        {
-            lastFrame?.Dispose();
-            lastFrame = null;
-        }
+        watchdog.Stop();
+        startCts?.Cancel();
+        session?.Dispose();
+        session = null;
         ClearPreview();
         base.OnFormClosing(e);
     }
@@ -618,6 +617,7 @@ internal sealed class MainForm : Form
         if (disposing)
         {
             overlayFont.Dispose();
+            watchdog.Dispose();
         }
         base.Dispose(disposing);
     }

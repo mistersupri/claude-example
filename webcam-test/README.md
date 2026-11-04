@@ -15,26 +15,22 @@ Status tampilan: **draft tanpa arahan desain** (belum ada `DESIGN.md`). UI memak
 
 | Kontrol | Fungsi | Pintasan |
 |---|---|---|
-| Daftar **Kamera** | Memilih kamera (Kamera 1 biasanya webcam bawaan laptop) | |
-| **Nyalakan kamera** / **Matikan kamera** | Menyalakan atau mematikan pratinjau | Alt+N / Alt+M |
+| Daftar **Kamera** | Memilih kamera menurut nama dari Windows. Kamera inframerah (Windows Hello) diberi tanda "(inframerah)" dan ditaruh paling bawah | |
+| **Nyalakan kamera** / **Matikan kamera** | Menyalakan atau mematikan pratinjau. Saat kamera sedang dibuka, tombol ini membatalkan | Alt+N / Alt+M |
 | **Ambil foto** | Menyimpan gambar saat ini sebagai JPG | Enter atau Alt+A |
 | **Buka folder foto** | Membuka Explorer di folder foto, dengan foto terakhir terpilih | Alt+F |
-| **Info perangkat** | Menampilkan daftar kamera Windows (termasuk yang berlabel IR), tipe GPU, dan hasil percobaan terakhir. Bisa disalin ke clipboard | Alt+I |
+| **Info perangkat** | Menampilkan kamera menurut Windows, perangkat di Device Manager, tipe GPU, dan catatan sesi. Bisa disalin ke clipboard | Alt+I |
 
 Foto tersimpan di `%USERPROFILE%\Pictures\WebcamTest\foto-YYYYMMDD-HHMMSS-mmm.jpg`.
 
-Jika kamera tidak bisa dibuka, cek:
+## Jika kamera tidak muncul atau gambar hitam
 
-- Kamera tidak sedang dipakai aplikasi lain (Zoom, Teams, browser).
-- Settings > Privacy & security > Camera: izinkan **Let desktop apps access your camera**.
-- Coba pilih nomor kamera lain di daftar.
+Aplikasi ini memakai API kamera resmi Windows (`MediaCapture`), sama seperti aplikasi Camera bawaan, dan memberi pesan yang spesifik:
 
-Jika pratinjau hitam atau kamera tidak muncul:
-
-- Pilihan **Otomatis** mencoba Kamera 1 sampai 4, masing-masing lewat DirectShow, DirectShow MJPG 720p, lalu Media Foundation, dan memakai yang pertama menghasilkan gambar bukan hitam. Status bar menunjukkan percobaan yang sedang berjalan.
-- Satu percobaan dibatasi 8 detik. Kamera yang tidak merespons (biasanya kamera IR Windows Hello) dilewati, lalu pencarian lanjut ke nomor kamera berikutnya.
-- Hardware transform Media Foundation dimatikan (`OPENCV_VIDEOIO_MSMF_ENABLE_HW_TRANSFORMS=0`).
-- Kalau semuanya gagal, layar menampilkan hasil tiap percobaan (hitam, tidak merespons, tidak bisa dibuka). Laptop dengan Windows Hello punya kamera inframerah yang ikut terdaftar dan hanya menghasilkan gambar hitam di aplikasi biasa.
+- **Windows menolak akses kamera**: Settings > Privacy & security > Camera, nyalakan **Camera access** dan **Let desktop apps access your camera**.
+- **Tidak merespons saat dibuka (15 detik)** atau **terbuka tetapi tidak ada gambar (10 detik)**: restart layanan **Windows Camera Frame Server** di `services.msc`, dan tutup aplikasi lain yang memakai kamera.
+- **Gambar masih hitam setelah 6 detik**: cek penutup lensa atau tombol kamera di keyboard, matikan efek kamera (Windows Studio Effects, aplikasi kamera pabrikan) di Settings > Bluetooth & devices > Cameras, atau pilih kamera lain di daftar.
+- Tekan **Info perangkat** untuk melihat catatan sesi, lalu salin dan kirim saat melapor masalah.
 
 ## Build sendiri
 
@@ -49,7 +45,7 @@ Build rilis yang sama dengan GitHub Actions:
 
 ```powershell
 dotnet publish WebcamTest.csproj -c Release -r win-x64 --self-contained true `
-  -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o publish
+  -p:PublishSingleFile=true -o publish
 ```
 
 ## Rilis otomatis
@@ -59,4 +55,4 @@ Workflow `.github/workflows/webcam-test-release.yml` berjalan setiap ada push ya
 ## Teknologi
 
 - .NET 8 Windows Forms: jendela native Windows, tanpa runtime tambahan karena dipublish self-contained.
-- [OpenCvSharp](https://github.com/shimat/opencvsharp) dengan backend DirectShow untuk membaca kamera.
+- Windows `MediaCapture` dengan `MediaFrameReader` untuk membaca kamera (butuh Windows 10 versi 2004 atau lebih baru).
