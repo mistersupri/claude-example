@@ -28,6 +28,12 @@ Jika kamera tidak bisa dibuka, cek:
 - Settings > Privacy & security > Camera: izinkan **Let desktop apps access your camera**.
 - Coba pilih nomor kamera lain di daftar.
 
+Jika pratinjau hitam:
+
+- Aplikasi sudah mematikan hardware transform Media Foundation (`OPENCV_VIDEOIO_MSMF_ENABLE_HW_TRANSFORMS=0`), penyebab layar hitam yang umum di webcam laptop.
+- Saat menyala, aplikasi mencoba Media Foundation dulu, lalu DirectShow. Backend yang menghasilkan gambar bukan hitam yang dipakai, dan namanya tampil di status bar.
+- Kalau kedua backend tetap hitam, aplikasi menampilkan pesan. Cek penutup lensa (privacy shutter) atau tombol kamera di keyboard, lalu coba nomor kamera lain: laptop dengan Windows Hello punya kamera inframerah yang ikut terdaftar.
+
 ## Build sendiri
 
 Butuh Windows dan .NET 8 SDK.

@@ -11,6 +11,16 @@ internal sealed class MainForm : Form
 
     private const int CameraSlots = 4;
     private const int MaxEmptyReads = 50;
+    private const int WarmupFrames = 60;
+    private const double BlackThreshold = 3.0;
+
+    // Media Foundation first: it is the default Windows camera stack. DirectShow is the fallback
+    // for drivers whose Media Foundation output is black or fails to open.
+    private static readonly (VideoCaptureAPIs Api, string Name)[] Backends =
+    {
+        (VideoCaptureAPIs.MSMF, "Media Foundation"),
+        (VideoCaptureAPIs.DSHOW, "DirectShow"),
+    };
 
     private readonly ComboBox cameraList = new()
     {
@@ -115,7 +125,6 @@ internal sealed class MainForm : Form
         var busy = newState is CameraState.Opening or CameraState.Running;
 
         cameraList.Enabled = !busy;
-        toggleButton.Enabled = newState != CameraState.Opening;
         toggleButton.Text = busy ? "&Matikan kamera" : "&Nyalakan kamera";
         captureButton.Enabled = running;
 
@@ -131,7 +140,7 @@ internal sealed class MainForm : Form
         {
             CameraState.Idle => $"Foto disimpan ke {photoFolder}",
             CameraState.Opening => "Menunggu kamera...",
-            CameraState.Running => "Kamera aktif. Tekan Enter atau \"Ambil foto\" untuk menyimpan gambar.",
+            CameraState.Running => $"Kamera aktif ({message}). Tekan Enter atau \"Ambil foto\" untuk menyimpan gambar.",
             CameraState.Error => "Terjadi masalah dengan kamera. Coba kamera lain atau tutup aplikasi yang sedang memakainya.",
             _ => "",
         };
@@ -188,22 +197,32 @@ internal sealed class MainForm : Form
     // Runs on a worker thread; every UI change goes through PostToUi.
     private void RunCapture(int index, CancellationToken token)
     {
-        using var capture = new VideoCapture(index, VideoCaptureAPIs.DSHOW);
-        if (!capture.IsOpened())
+        using var frame = new Mat();
+        using var capture = OpenWorkingCapture(index, frame, token, out var backendName, out var blackOnly);
+        if (capture is null)
         {
-            PostToUi(() => SetState(CameraState.Error,
-                $"Kamera {index + 1} tidak bisa dibuka.\n" +
-                "Pastikan kamera tersambung, tidak dipakai aplikasi lain,\n" +
-                "dan akses kamera diizinkan di Settings > Privacy & security > Camera."));
+            if (token.IsCancellationRequested)
+            {
+                return;
+            }
+            var message = blackOnly
+                ? $"Kamera {index + 1} menyala tetapi hanya mengirim gambar hitam.\n" +
+                  "Cek penutup lensa (privacy shutter) atau tombol kamera di keyboard,\n" +
+                  "atau pilih kamera lain: kamera inframerah Windows Hello juga ikut terdaftar."
+                : $"Kamera {index + 1} tidak bisa dibuka.\n" +
+                  "Pastikan kamera tersambung, tidak dipakai aplikasi lain,\n" +
+                  "dan akses kamera diizinkan di Settings > Privacy & security > Camera.";
+            PostToUi(() => SetState(CameraState.Error, message));
             return;
         }
 
-        using var frame = new Mat();
+        // OpenWorkingCapture leaves the first good frame in `frame`.
+        var haveFrame = true;
         var emptyReads = 0;
 
         while (!token.IsCancellationRequested)
         {
-            if (!capture.Read(frame) || frame.Empty())
+            if (!haveFrame && (!capture.Read(frame) || frame.Empty()))
             {
                 if (++emptyReads >= MaxEmptyReads)
                 {
@@ -215,6 +234,7 @@ internal sealed class MainForm : Form
                 continue;
             }
 
+            haveFrame = false;
             emptyReads = 0;
             lock (frameLock)
             {
@@ -232,13 +252,74 @@ internal sealed class MainForm : Form
                 }
                 if (state == CameraState.Opening)
                 {
-                    SetState(CameraState.Running);
+                    SetState(CameraState.Running, backendName);
                 }
                 var old = preview.Image;
                 preview.Image = bitmap;
                 old?.Dispose();
             });
         }
+    }
+
+    // Tries each backend until one delivers a frame that is not black. Cameras often send
+    // a few black frames while the sensor warms up, so each backend gets WarmupFrames reads.
+    private VideoCapture? OpenWorkingCapture(
+        int index, Mat frame, CancellationToken token, out string backendName, out bool blackOnly)
+    {
+        backendName = "";
+        blackOnly = false;
+
+        foreach (var (api, name) in Backends)
+        {
+            if (token.IsCancellationRequested)
+            {
+                return null;
+            }
+            PostToUi(() =>
+            {
+                if (state == CameraState.Opening)
+                {
+                    statusLabel.Text = $"Membuka kamera lewat {name}...";
+                }
+            });
+
+            var capture = new VideoCapture(index, api);
+            if (!capture.IsOpened())
+            {
+                capture.Dispose();
+                continue;
+            }
+            if (api == VideoCaptureAPIs.DSHOW)
+            {
+                capture.Set(VideoCaptureProperties.FourCC, VideoWriter.FourCC('M', 'J', 'P', 'G'));
+            }
+
+            var gotFrame = false;
+            for (var i = 0; i < WarmupFrames && !token.IsCancellationRequested; i++)
+            {
+                if (!capture.Read(frame) || frame.Empty())
+                {
+                    Thread.Sleep(20);
+                    continue;
+                }
+                gotFrame = true;
+                if (!IsBlack(frame))
+                {
+                    backendName = name;
+                    return capture;
+                }
+            }
+
+            blackOnly |= gotFrame;
+            capture.Dispose();
+        }
+        return null;
+    }
+
+    private static bool IsBlack(Mat frame)
+    {
+        var mean = Cv2.Mean(frame);
+        return mean.Val0 + mean.Val1 + mean.Val2 < BlackThreshold;
     }
 
     private void PostToUi(Action action)
