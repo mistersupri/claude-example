@@ -271,13 +271,13 @@ internal sealed class MainForm : Form
 
     // Tries every camera index (or only the chosen one) with every backend, and keeps the first
     // one that delivers a non-black frame. Each attempt has a time limit so a driver that hangs
-    // cannot freeze the search; a backend that timed out once is skipped from then on.
+    // (typically the infrared camera used by Windows Hello) cannot freeze the search; after a
+    // timeout the search skips to the next camera number.
     private (VideoCapture? Capture, int Index, string Backend, List<string> Log) FindWorkingCamera(
         int selected, CancellationToken token)
     {
         var indices = selected < 0 ? Enumerable.Range(0, CameraSlots).ToArray() : new[] { selected };
         var log = new List<string>();
-        var timedOut = new HashSet<VideoCaptureAPIs>();
 
         foreach (var index in indices)
         {
@@ -287,12 +287,6 @@ internal sealed class MainForm : Form
                 {
                     return (null, index, "", log);
                 }
-                if (timedOut.Contains(api))
-                {
-                    log.Add($"Kamera {index + 1} / {name}: dilewati karena sebelumnya tidak merespons");
-                    continue;
-                }
-
                 PostToUi(() =>
                 {
                     if (state == CameraState.Opening)
@@ -309,7 +303,10 @@ internal sealed class MainForm : Form
                 }
                 if (outcome == Outcome.Timeout)
                 {
-                    timedOut.Add(api);
+                    // The abandoned attempt still holds this camera, so more tries on it would hang too.
+                    // Move on to the next camera number instead.
+                    log.Add($"Kamera {index + 1}: percobaan lain dilewati, lanjut ke kamera berikutnya");
+                    break;
                 }
             }
         }
@@ -322,7 +319,7 @@ internal sealed class MainForm : Form
         Outcome.NotOpened => "tidak bisa dibuka",
         Outcome.NoFrames => "terbuka tetapi tidak mengirim gambar",
         Outcome.Black => "hanya gambar hitam",
-        Outcome.Timeout => "tidak merespons",
+        Outcome.Timeout => "tidak merespons (kamera IR sering begini)",
         _ => "dibatalkan",
     };
 
