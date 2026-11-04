@@ -19,6 +19,7 @@ Status tampilan: **draft tanpa arahan desain** (belum ada `DESIGN.md`). UI memak
 | **Nyalakan kamera** / **Matikan kamera** | Menyalakan atau mematikan pratinjau | Alt+N / Alt+M |
 | **Ambil foto** | Menyimpan gambar saat ini sebagai JPG | Enter atau Alt+A |
 | **Buka folder foto** | Membuka Explorer di folder foto, dengan foto terakhir terpilih | Alt+F |
+| **Info perangkat** | Menampilkan daftar kamera Windows (termasuk yang berlabel IR), tipe GPU, dan hasil percobaan terakhir. Bisa disalin ke clipboard | Alt+I |
 
 Foto tersimpan di `%USERPROFILE%\Pictures\WebcamTest\foto-YYYYMMDD-HHMMSS-mmm.jpg`.
 
@@ -30,7 +31,7 @@ Jika kamera tidak bisa dibuka, cek:
 
 Jika pratinjau hitam atau kamera tidak muncul:
 
-- Pilihan **Otomatis** mencoba Kamera 1 sampai 4, masing-masing lewat DirectShow lalu Media Foundation, dan memakai yang pertama menghasilkan gambar bukan hitam. Status bar menunjukkan percobaan yang sedang berjalan.
+- Pilihan **Otomatis** mencoba Kamera 1 sampai 4, masing-masing lewat DirectShow, DirectShow MJPG 720p, lalu Media Foundation, dan memakai yang pertama menghasilkan gambar bukan hitam. Status bar menunjukkan percobaan yang sedang berjalan.
 - Satu percobaan dibatasi 8 detik. Backend yang tidak merespons dilewati untuk kamera berikutnya.
 - Hardware transform Media Foundation dimatikan (`OPENCV_VIDEOIO_MSMF_ENABLE_HW_TRANSFORMS=0`).
 - Kalau semuanya gagal, layar menampilkan hasil tiap percobaan (hitam, tidak merespons, tidak bisa dibuka). Laptop dengan Windows Hello punya kamera inframerah yang ikut terdaftar dan hanya menghasilkan gambar hitam di aplikasi biasa.

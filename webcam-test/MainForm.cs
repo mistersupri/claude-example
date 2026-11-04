@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using System.Management;
+using System.Text;
 using OpenCvSharp;
 using OpenCvSharp.Extensions;
 using Size = System.Drawing.Size;
@@ -16,10 +18,13 @@ internal sealed class MainForm : Form
     private static readonly TimeSpan AttemptTimeout = TimeSpan.FromSeconds(8);
 
     // DirectShow first: Media Foundation can block forever while opening on some drivers.
-    private static readonly (VideoCaptureAPIs Api, string Name)[] Backends =
+    // The MJPG 720p variant asks the driver for the compressed format most camera apps use,
+    // which works on some cameras whose default uncompressed format shows black.
+    private static readonly (VideoCaptureAPIs Api, string Name, bool Mjpg)[] Backends =
     {
-        (VideoCaptureAPIs.DSHOW, "DirectShow"),
-        (VideoCaptureAPIs.MSMF, "Media Foundation"),
+        (VideoCaptureAPIs.DSHOW, "DirectShow", false),
+        (VideoCaptureAPIs.DSHOW, "DirectShow MJPG 720p", true),
+        (VideoCaptureAPIs.MSMF, "Media Foundation", false),
     };
 
     private enum Outcome { Ok, NotOpened, NoFrames, Black, Timeout, Cancelled }
@@ -35,6 +40,7 @@ internal sealed class MainForm : Form
     private readonly Button toggleButton = CreateButton("&Nyalakan kamera");
     private readonly Button captureButton = CreateButton("&Ambil foto");
     private readonly Button openFolderButton = CreateButton("Buka &folder foto");
+    private readonly Button infoButton = CreateButton("&Info perangkat");
 
     private readonly PictureBox preview = new()
     {
@@ -60,6 +66,7 @@ internal sealed class MainForm : Form
     private CameraState state = CameraState.Idle;
     private string overlayText = "";
     private string? lastSavedPath;
+    private volatile string lastAttemptLog = "";
 
     public MainForm()
     {
@@ -93,6 +100,7 @@ internal sealed class MainForm : Form
         toolbar.Controls.Add(toggleButton);
         toolbar.Controls.Add(captureButton);
         toolbar.Controls.Add(openFolderButton);
+        toolbar.Controls.Add(infoButton);
 
         var statusStrip = new StatusStrip { SizingGrip = true };
         statusStrip.Items.Add(statusLabel);
@@ -106,6 +114,7 @@ internal sealed class MainForm : Form
         toggleButton.Click += async (_, _) => await ToggleCameraAsync();
         captureButton.Click += (_, _) => CapturePhoto();
         openFolderButton.Click += (_, _) => OpenPhotoFolder();
+        infoButton.Click += async (_, _) => await ShowDeviceInfoAsync();
         preview.Paint += DrawOverlay;
         preview.Resize += (_, _) => preview.Invalidate();
 
@@ -202,6 +211,7 @@ internal sealed class MainForm : Form
     {
         var (capture, cameraIndex, backendName, log) = FindWorkingCamera(selected, token);
         using var ownedCapture = capture;
+        lastAttemptLog = string.Join("\n", log);
         if (capture is null)
         {
             if (!token.IsCancellationRequested)
@@ -271,7 +281,7 @@ internal sealed class MainForm : Form
 
         foreach (var index in indices)
         {
-            foreach (var (api, name) in Backends)
+            foreach (var (api, name, mjpg) in Backends)
             {
                 if (token.IsCancellationRequested)
                 {
@@ -291,7 +301,7 @@ internal sealed class MainForm : Form
                     }
                 });
 
-                var (outcome, capture) = TryOpen(index, api, token);
+                var (outcome, capture) = TryOpen(index, api, mjpg, token);
                 log.Add($"Kamera {index + 1} / {name}: {Describe(outcome)}");
                 if (outcome == Outcome.Ok)
                 {
@@ -316,9 +326,9 @@ internal sealed class MainForm : Form
         _ => "dibatalkan",
     };
 
-    private static (Outcome, VideoCapture?) TryOpen(int index, VideoCaptureAPIs api, CancellationToken token)
+    private static (Outcome, VideoCapture?) TryOpen(int index, VideoCaptureAPIs api, bool mjpg, CancellationToken token)
     {
-        var attempt = Task.Run(() => OpenAndWarmUp(index, api, token));
+        var attempt = Task.Run(() => OpenAndWarmUp(index, api, mjpg, token));
         try
         {
             if (attempt.Wait(AttemptTimeout, token))
@@ -339,13 +349,19 @@ internal sealed class MainForm : Form
     }
 
     // Cameras often send a few black frames while the sensor warms up, hence WarmupFrames reads.
-    private static (Outcome, VideoCapture?) OpenAndWarmUp(int index, VideoCaptureAPIs api, CancellationToken token)
+    private static (Outcome, VideoCapture?) OpenAndWarmUp(int index, VideoCaptureAPIs api, bool mjpg, CancellationToken token)
     {
         var capture = new VideoCapture(index, api);
         if (!capture.IsOpened())
         {
             capture.Dispose();
             return (Outcome.NotOpened, null);
+        }
+        if (mjpg)
+        {
+            capture.Set(VideoCaptureProperties.FourCC, VideoWriter.FourCC('M', 'J', 'P', 'G'));
+            capture.Set(VideoCaptureProperties.FrameWidth, 1280);
+            capture.Set(VideoCaptureProperties.FrameHeight, 720);
         }
 
         using var frame = new Mat();
@@ -442,6 +458,121 @@ internal sealed class MainForm : Form
         {
             statusLabel.Text = $"Folder foto tidak bisa dibuka: {ex.Message}";
         }
+    }
+
+    private async Task ShowDeviceInfoAsync()
+    {
+        infoButton.Enabled = false;
+        statusLabel.Text = "Membaca daftar perangkat...";
+        try
+        {
+            var text = await Task.Run(BuildDeviceInfo);
+            ShowTextDialog("Info perangkat", text);
+        }
+        finally
+        {
+            infoButton.Enabled = true;
+            statusLabel.Text = state == CameraState.Running ? statusLabel.Text : $"Foto disimpan ke {photoFolder}";
+        }
+    }
+
+    private string BuildDeviceInfo()
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine($"Windows: {Environment.OSVersion.VersionString}");
+        sb.AppendLine();
+        sb.AppendLine("Kamera yang dikenal Windows:");
+        AppendQuery(sb,
+            "SELECT Name, PNPClass, Status FROM Win32_PnPEntity WHERE PNPClass = 'Camera' OR PNPClass = 'Image'",
+            o => $"- {o["Name"]} [{o["PNPClass"]}, status: {o["Status"]}]");
+        sb.AppendLine();
+        sb.AppendLine("GPU:");
+        AppendQuery(sb,
+            "SELECT Name, DriverVersion FROM Win32_VideoController",
+            o => $"- {o["Name"]} (driver {o["DriverVersion"]})");
+        sb.AppendLine();
+        sb.AppendLine("Hasil percobaan membuka kamera yang terakhir:");
+        sb.AppendLine(lastAttemptLog.Length == 0 ? "(belum ada, tekan Nyalakan kamera dulu)" : lastAttemptLog);
+        sb.AppendLine();
+        sb.AppendLine("Catatan: kamera berlabel IR (inframerah, untuk Windows Hello) biasanya hanya menghasilkan gambar hitam.");
+        return sb.ToString();
+    }
+
+    private static void AppendQuery(StringBuilder sb, string query, Func<ManagementBaseObject, string> format)
+    {
+        try
+        {
+            using var searcher = new ManagementObjectSearcher(query);
+            using var results = searcher.Get();
+            var any = false;
+            foreach (ManagementBaseObject item in results)
+            {
+                any = true;
+                sb.AppendLine(format(item));
+                item.Dispose();
+            }
+            if (!any)
+            {
+                sb.AppendLine("(tidak ada)");
+            }
+        }
+        catch (Exception ex) when (ex is ManagementException or UnauthorizedAccessException or System.Runtime.InteropServices.COMException)
+        {
+            sb.AppendLine($"(gagal membaca: {ex.Message})");
+        }
+    }
+
+    private void ShowTextDialog(string title, string text)
+    {
+        using var mono = new Font(FontFamily.GenericMonospace, 10f);
+        using var dialog = new Form
+        {
+            Text = title,
+            ClientSize = new Size(680, 440),
+            StartPosition = FormStartPosition.CenterParent,
+            FormBorderStyle = FormBorderStyle.FixedDialog,
+            MinimizeBox = false,
+            MaximizeBox = false,
+            ShowInTaskbar = false,
+        };
+        var box = new TextBox
+        {
+            Multiline = true,
+            ReadOnly = true,
+            ScrollBars = ScrollBars.Vertical,
+            Dock = DockStyle.Fill,
+            Font = mono,
+            Text = text.Replace("\r\n", "\n").Replace("\n", "\r\n"),
+            AccessibleName = title,
+        };
+        var copyButton = CreateButton("&Salin ke clipboard");
+        var closeButton = CreateButton("&Tutup");
+        closeButton.DialogResult = DialogResult.Cancel;
+        copyButton.Click += (_, _) =>
+        {
+            try
+            {
+                Clipboard.SetText(text);
+                copyButton.Text = "Tersalin";
+            }
+            catch (System.Runtime.InteropServices.ExternalException)
+            {
+                copyButton.Text = "Gagal menyalin, blok teks lalu Ctrl+C";
+            }
+        };
+        var buttons = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Bottom,
+            AutoSize = true,
+            Padding = new Padding(10),
+            FlowDirection = FlowDirection.RightToLeft,
+        };
+        buttons.Controls.Add(closeButton);
+        buttons.Controls.Add(copyButton);
+        dialog.Controls.Add(box);
+        dialog.Controls.Add(buttons);
+        dialog.CancelButton = closeButton;
+        dialog.ShowDialog(this);
     }
 
     private void ClearPreview()
