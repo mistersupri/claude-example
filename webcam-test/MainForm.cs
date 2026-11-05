@@ -2,7 +2,9 @@ using System.Diagnostics;
 using System.Drawing.Imaging;
 using System.Management;
 using System.Runtime.InteropServices;
+using System.Security.Principal;
 using System.Text;
+using Microsoft.Win32;
 using Windows.Media.Capture.Frames;
 
 namespace WebcamTest;
@@ -535,6 +537,13 @@ internal sealed class MainForm : Form
             "SELECT Name, PNPClass, Status FROM Win32_PnPEntity WHERE PNPClass = 'Camera' OR PNPClass = 'Image'",
             o => $"- {o["Name"]} [{o["PNPClass"]}, status: {o["Status"]}]");
         sb.AppendLine();
+        sb.AppendLine("Layanan kamera Windows:");
+        AppendQuery(sb,
+            "SELECT Name, State, StartMode FROM Win32_Service WHERE Name = 'FrameServer' OR Name = 'FrameServerMonitor'",
+            o => $"- {o["Name"]}: {o["State"]}, start {o["StartMode"]}");
+        sb.AppendLine();
+        AppendCameraPrivacy(sb);
+        sb.AppendLine();
         sb.AppendLine("GPU:");
         AppendQuery(sb,
             "SELECT Name, DriverVersion FROM Win32_VideoController",
@@ -543,6 +552,57 @@ internal sealed class MainForm : Form
         sb.AppendLine("Catatan sesi ini:");
         sb.AppendLine(log);
         return sb.ToString();
+    }
+
+    private static void AppendCameraPrivacy(StringBuilder sb)
+    {
+        const string root = @"Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\webcam";
+        using var identity = WindowsIdentity.GetCurrent();
+        var elevated = new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator);
+
+        sb.AppendLine("Izin kamera Windows (Allow = diizinkan, Deny = ditolak):");
+        sb.AppendLine($"- Aplikasi ini berjalan sebagai administrator: {(elevated ? "ya" : "tidak")}");
+        sb.AppendLine($"- Akses kamera, pengguna: {ReadConsent(Registry.CurrentUser, root)}");
+        sb.AppendLine($"- Akses kamera, seluruh perangkat: {ReadConsent(Registry.LocalMachine, root)}");
+        sb.AppendLine($"- Aplikasi desktop, pengguna: {ReadConsent(Registry.CurrentUser, root + @"\NonPackaged")}");
+        sb.AppendLine($"- Aplikasi desktop, seluruh perangkat: {ReadConsent(Registry.LocalMachine, root + @"\NonPackaged")}");
+        sb.AppendLine("Aplikasi desktop yang tercatat memakai kamera:");
+        try
+        {
+            using var apps = Registry.CurrentUser.OpenSubKey(root + @"\NonPackaged");
+            var names = apps?.GetSubKeyNames() ?? Array.Empty<string>();
+            if (names.Length == 0)
+            {
+                sb.AppendLine("(tidak ada)");
+            }
+            foreach (var name in names.Take(30))
+            {
+                using var app = apps!.OpenSubKey(name);
+                var value = app?.GetValue("Value") as string ?? "?";
+                var started = app?.GetValue("LastUsedTimeStart") as long? ?? 0;
+                var stopped = app?.GetValue("LastUsedTimeStop") as long? ?? 0;
+                var last = started == 0 ? "belum pernah" : DateTime.FromFileTime(started).ToString("yyyy-MM-dd HH:mm:ss");
+                var inUse = started != 0 && stopped == 0 ? ", masih dipakai" : "";
+                sb.AppendLine($"- {name.Replace('#', '\\')}: {value}, terakhir {last}{inUse}");
+            }
+        }
+        catch (Exception ex) when (ex is System.Security.SecurityException or UnauthorizedAccessException or IOException)
+        {
+            sb.AppendLine($"(gagal membaca: {ex.Message})");
+        }
+    }
+
+    private static string ReadConsent(RegistryKey hive, string path)
+    {
+        try
+        {
+            using var key = hive.OpenSubKey(path);
+            return key?.GetValue("Value") as string ?? "(tidak diatur)";
+        }
+        catch (Exception ex) when (ex is System.Security.SecurityException or UnauthorizedAccessException or IOException)
+        {
+            return "(gagal dibaca)";
+        }
     }
 
     private static void AppendQuery(StringBuilder sb, string query, Func<ManagementBaseObject, string> format)
