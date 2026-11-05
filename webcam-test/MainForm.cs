@@ -274,8 +274,9 @@ internal sealed class MainForm : Form
                 ReleaseWhenStartFinishes(start);
                 if (!token.IsCancellationRequested)
                 {
-                    Log($"{choice}: tidak merespons dalam {OpenTimeout.TotalSeconds:0} detik");
-                    SetState(CameraState.Error,
+                    await FailOrRetryAsync(
+                        modeIndex,
+                        $"{choice}: tidak merespons dalam {OpenTimeout.TotalSeconds:0} detik",
                         $"{choice} tidak merespons saat dibuka.\n\n" +
                         "Coba restart layanan Windows Camera Frame Server (services.msc),\n" +
                         "tutup aplikasi lain yang memakai kamera, atau pilih kamera lain.");
@@ -293,6 +294,10 @@ internal sealed class MainForm : Form
             session = started;
             sessionStartedAt = DateTime.UtcNow;
             Log($"{choice}: terbuka ({started.FormatInfo}), menunggu gambar");
+            if (modeIndex == 0 && started.SupportedFormats.Length > 0)
+            {
+                Log($"Format yang didukung kamera: {started.SupportedFormats}");
+            }
         }
         catch (UnauthorizedAccessException)
         {
@@ -304,9 +309,26 @@ internal sealed class MainForm : Form
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            Log($"{choice}: gagal, {ex.Message}");
-            SetState(CameraState.Error, $"{choice} tidak bisa dibuka.\n\n{ex.Message}");
+            if (!token.IsCancellationRequested)
+            {
+                await FailOrRetryAsync(
+                    modeIndex,
+                    $"{choice} ({CameraSession.Describe(mode)}): gagal, {ex.Message}",
+                    $"{choice} tidak bisa dibuka.\n\n{ex.Message}");
+            }
         }
+    }
+
+    // Tries the next way of reading the camera, or shows the error when none is left.
+    private async Task FailOrRetryAsync(int modeIndex, string logLine, string errorMessage)
+    {
+        Log(logLine);
+        if (state == CameraState.Opening && modeIndex + 1 < Modes.Length)
+        {
+            await StartCameraAsync(modeIndex + 1);
+            return;
+        }
+        SetState(CameraState.Error, errorMessage);
     }
 
     // A start that was abandoned (timeout or cancel) may still finish later; close it then.
@@ -396,7 +418,7 @@ internal sealed class MainForm : Form
                 }
                 SetState(CameraState.Error,
                     $"{activeCameraName} terbuka tetapi tidak mengirim gambar,\n" +
-                    "walau sudah dicoba dengan 3 cara membaca kamera.\n\n" +
+                    $"walau sudah dicoba dengan {Modes.Length} cara membaca kamera.\n\n" +
                     $"Rincian: {diagnostics}\n\n" +
                     "Coba restart layanan Windows Camera Frame Server (services.msc),\n" +
                     "atau matikan efek kamera (Settings > Bluetooth & devices > Cameras).");
