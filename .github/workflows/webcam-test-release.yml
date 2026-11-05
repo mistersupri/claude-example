@@ -26,17 +26,15 @@ jobs:
         with:
           dotnet-version: "8.0.x"
 
+      # The XAML host package uses MSBuild tasks that only Visual Studio's MSBuild supports, not `dotnet build`.
+      - uses: microsoft/setup-msbuild@v2
+
       - name: Build
-        run: >
-          dotnet publish WebcamTest.csproj
-          -c Release
-          -p:DebugType=none
-          -p:Version=${{ env.VERSION }}
-          -o publish
+        run: msbuild WebcamTest.csproj /restore /p:Configuration=Release /p:DebugType=none /p:Version=${{ env.VERSION }}
 
       - name: Zip
         shell: pwsh
-        run: Compress-Archive -Path publish/* -DestinationPath WebcamTest.zip
+        run: Compress-Archive -Path bin/Release/net48/* -DestinationPath WebcamTest.zip
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2

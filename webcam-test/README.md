@@ -34,18 +34,14 @@ Aplikasi ini memakai API kamera resmi Windows (`MediaCapture`). Cara pertama yan
 
 ## Build sendiri
 
-Butuh Windows dan .NET SDK 8 (untuk perintah `dotnet`; aplikasinya sendiri berjalan di .NET Framework 4.8).
+Butuh Windows dan Visual Studio 2022 (atau Build Tools) dengan MSBuild. Paket XamlHost memakai tugas build yang tidak didukung `dotnet build`, jadi pakai `msbuild`.
 
 ```powershell
 cd webcam-test
-dotnet run
+msbuild WebcamTest.csproj /restore /p:Configuration=Release
 ```
 
-Build rilis yang sama dengan GitHub Actions:
-
-```powershell
-dotnet publish WebcamTest.csproj -c Release -o publish
-```
+Hasilnya ada di `bin\Release\net48\`; jalankan `WebcamTest.exe` dari folder itu. Perintah yang sama dipakai GitHub Actions.
 
 ## Rilis otomatis
 
