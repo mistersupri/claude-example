@@ -20,7 +20,7 @@ internal sealed class MainForm : Form
     }
 
     private static readonly TimeSpan OpenTimeout = TimeSpan.FromSeconds(15);
-    private static readonly TimeSpan FirstFrameTimeout = TimeSpan.FromSeconds(6);
+    private static readonly TimeSpan FirstFrameTimeout = TimeSpan.FromSeconds(8);
     private static readonly TimeSpan BlackHintDelay = TimeSpan.FromSeconds(6);
     private const int MaxLogLines = 60;
 

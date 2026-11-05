@@ -6,6 +6,7 @@ using Windows.Graphics.Imaging;
 using Windows.Media.Capture;
 using Windows.Media.Capture.Frames;
 using Windows.Media.MediaProperties;
+using Windows.Storage.Streams;
 
 namespace WebcamTest;
 
@@ -17,6 +18,12 @@ internal enum CaptureMode
 
     /// <summary>Shared access to the video-record stream.</summary>
     SharedRecord,
+
+    /// <summary>
+    /// No video stream: take still photos one after another and show them as the preview.
+    /// Slower, but needs neither the preview nor the record stream to deliver frames.
+    /// </summary>
+    PhotoPolling,
 
     /// <summary>Exclusive control of the camera, preview stream.</summary>
     ExclusivePreview,
@@ -35,7 +42,9 @@ internal sealed class CameraSession : IDisposable
     private const int MaxListedFormats = 24;
 
     private readonly MediaCapture capture;
-    private readonly MediaFrameReader reader;
+    private readonly MediaFrameReader? reader;
+    private CancellationTokenSource? photoCts;
+    private Task? photoTask;
     private readonly Action<Bitmap, bool> onFrame;
     private int converting;
     private bool disposed;
@@ -45,7 +54,7 @@ internal sealed class CameraSession : IDisposable
     private volatile string? lastError;
 
     private CameraSession(
-        MediaCapture capture, MediaFrameReader reader, string formatInfo, string supportedFormats,
+        MediaCapture capture, MediaFrameReader? reader, string formatInfo, string supportedFormats,
         Action<Bitmap, bool> onFrame)
     {
         this.capture = capture;
@@ -69,6 +78,7 @@ internal sealed class CameraSession : IDisposable
     {
         CaptureMode.SharedPreview => "bagi pakai, aliran pratinjau",
         CaptureMode.SharedRecord => "bagi pakai, aliran rekam",
+        CaptureMode.PhotoPolling => "foto berulang, tanpa aliran video",
         CaptureMode.ExclusivePreview => "kendali penuh, aliran pratinjau",
         CaptureMode.SharedAnyColor => "bagi pakai, aliran berwarna pertama",
         _ => mode.ToString(),
@@ -82,6 +92,11 @@ internal sealed class CameraSession : IDisposable
         var capture = new MediaCapture();
         try
         {
+            if (mode == CaptureMode.PhotoPolling)
+            {
+                return await StartPhotoPollingAsync(capture, group, onFrame);
+            }
+
             var exclusive = mode == CaptureMode.ExclusivePreview;
             await capture.InitializeAsync(new MediaCaptureInitializationSettings
             {
@@ -148,10 +163,20 @@ internal sealed class CameraSession : IDisposable
         {
             return;
         }
-        reader.FrameArrived -= OnFrameArrived;
+
+        photoCts?.Cancel();
         try
         {
-            await reader.StopAsync();
+            if (photoTask is not null)
+            {
+                // A photo call that is stuck in the driver must not block closing the camera.
+                await Task.WhenAny(photoTask, Task.Delay(TimeSpan.FromSeconds(2)));
+            }
+            if (reader is not null)
+            {
+                reader.FrameArrived -= OnFrameArrived;
+                await reader.StopAsync();
+            }
         }
         catch (Exception ex) when (ex is COMException or InvalidOperationException or ObjectDisposedException)
         {
@@ -167,9 +192,92 @@ internal sealed class CameraSession : IDisposable
             return;
         }
         disposed = true;
-        reader.FrameArrived -= OnFrameArrived;
-        reader.Dispose();
+        photoCts?.Cancel();
+        if (reader is not null)
+        {
+            reader.FrameArrived -= OnFrameArrived;
+            reader.Dispose();
+        }
         capture.Dispose();
+    }
+
+    private static async Task<CameraSession> StartPhotoPollingAsync(
+        MediaCapture capture, MediaFrameSourceGroup group, Action<Bitmap, bool> onFrame)
+    {
+        var device = group.SourceInfos
+            .FirstOrDefault(i => i.SourceKind == MediaFrameSourceKind.Color)?.DeviceInformation
+            ?? throw new NotSupportedException("Kamera ini tidak punya ID perangkat untuk foto berulang.");
+
+        await capture.InitializeAsync(new MediaCaptureInitializationSettings
+        {
+            VideoDeviceId = device.Id,
+            StreamingCaptureMode = StreamingCaptureMode.Video,
+        });
+
+        var session = new CameraSession(capture, null, "foto JPEG berulang", "", onFrame);
+        session.StartPhotoLoop();
+        return session;
+    }
+
+    private void StartPhotoLoop()
+    {
+        var cts = new CancellationTokenSource();
+        photoCts = cts;
+        photoTask = Task.Run(() => PhotoLoopAsync(cts.Token));
+    }
+
+    private async Task PhotoLoopAsync(CancellationToken token)
+    {
+        try
+        {
+            while (!token.IsCancellationRequested)
+            {
+                try
+                {
+                    using var stream = new InMemoryRandomAccessStream();
+                    await capture.CapturePhotoToStreamAsync(ImageEncodingProperties.CreateJpeg(), stream);
+                    Interlocked.Increment(ref eventCount);
+
+                    stream.Seek(0);
+                    using var input = stream.AsStreamForRead();
+                    using var buffer = new MemoryStream();
+                    await input.CopyToAsync(buffer, token);
+                    buffer.Position = 0;
+                    using var decoded = new Bitmap(buffer);
+                    var bitmap = new Bitmap(decoded);
+
+                    Interlocked.Increment(ref convertedCount);
+                    onFrame(bitmap, IsBlack(bitmap));
+                    await Task.Delay(30, token);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    // Keep trying; the reason is shown in the diagnostics.
+                    lastError = $"{ex.GetType().Name}: {ex.Message}";
+                    await Task.Delay(500, token);
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Stopped on purpose.
+        }
+    }
+
+    private static bool IsBlack(Bitmap bitmap)
+    {
+        const int size = 16;
+        using var small = new Bitmap(bitmap, size, size);
+        long sum = 0;
+        for (var y = 0; y < size; y++)
+        {
+            for (var x = 0; x < size; x++)
+            {
+                var pixel = small.GetPixel(x, y);
+                sum += pixel.R + pixel.G + pixel.B;
+            }
+        }
+        return sum / (double)(size * size * 3) < BlackMeanThreshold;
     }
 
     private async void OnFrameArrived(MediaFrameReader sender, MediaFrameArrivedEventArgs args)
