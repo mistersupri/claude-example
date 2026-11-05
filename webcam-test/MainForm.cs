@@ -4,7 +4,6 @@ using System.Management;
 using System.Runtime.InteropServices;
 using System.Security.Principal;
 using System.Text;
-using Microsoft.Toolkit.Forms.UI.XamlHost;
 using Microsoft.Win32;
 using Windows.Media.Capture.Frames;
 
@@ -14,18 +13,8 @@ internal sealed class MainForm : Form
 {
     private enum CameraState { Idle, Opening, Running, Error }
 
-    private sealed class CameraChoice
+    private sealed record CameraChoice(MediaFrameSourceGroup Group, bool HasColor)
     {
-        public CameraChoice(MediaFrameSourceGroup group, bool hasColor)
-        {
-            Group = group;
-            HasColor = hasColor;
-        }
-
-        public MediaFrameSourceGroup Group { get; }
-
-        public bool HasColor { get; }
-
         public override string ToString() =>
             HasColor ? Group.DisplayName : $"{Group.DisplayName} (inframerah)";
     }
@@ -36,7 +25,7 @@ internal sealed class MainForm : Form
     private const int MaxLogLines = 60;
 
     // Tried in this order when a camera opens but sends no pictures.
-    private static readonly CaptureMode[] Modes = (CaptureMode[])Enum.GetValues(typeof(CaptureMode));
+    private static readonly CaptureMode[] Modes = Enum.GetValues<CaptureMode>();
 
     private static readonly ImageCodecInfo JpegCodec =
         ImageCodecInfo.GetImageEncoders().First(c => c.FormatID == ImageFormat.Jpeg.Guid);
@@ -59,15 +48,6 @@ internal sealed class MainForm : Form
         Dock = DockStyle.Fill,
         SizeMode = PictureBoxSizeMode.Zoom,
         BackColor = Color.Black,
-    };
-
-    // The Windows Camera app's preview control, hosted through XAML Islands. Hidden until a camera uses it.
-    private readonly WindowsXamlHost xamlHost = new()
-    {
-        InitialTypeName = "Windows.UI.Xaml.Controls.CaptureElement",
-        Dock = DockStyle.Fill,
-        BackColor = Color.Black,
-        Visible = false,
     };
 
     private readonly ToolStripStatusLabel statusLabel = new()
@@ -129,14 +109,13 @@ internal sealed class MainForm : Form
         statusStrip.Items.Add(statusLabel);
 
         Controls.Add(preview);
-        Controls.Add(xamlHost);
         Controls.Add(toolbar);
         Controls.Add(statusStrip);
 
         AcceptButton = captureButton;
 
         toggleButton.Click += async (_, _) => await ToggleCameraAsync();
-        captureButton.Click += async (_, _) => await CapturePhotoAsync();
+        captureButton.Click += (_, _) => CapturePhoto();
         openFolderButton.Click += (_, _) => OpenPhotoFolder();
         infoButton.Click += async (_, _) => await ShowDeviceInfoAsync();
         watchdog.Tick += async (_, _) => await WatchdogTickAsync();
@@ -209,10 +188,6 @@ internal sealed class MainForm : Form
         toggleButton.Enabled = busy || hasCameras;
         toggleButton.Text = busy ? "&Matikan kamera" : "&Nyalakan kamera";
         captureButton.Enabled = running;
-
-        var showXaml = running && session is { IsXamlPreview: true };
-        xamlHost.Visible = showXaml;
-        preview.Visible = !showXaml;
 
         if (running)
         {
@@ -291,29 +266,8 @@ internal sealed class MainForm : Form
         startCts = cts;
         var token = cts.Token;
 
-        Windows.UI.Xaml.Controls.CaptureElement? element = null;
-        if (mode == CaptureMode.XamlPreview)
-        {
-            try
-            {
-                _ = xamlHost.Handle; // Creates the XAML island and the CaptureElement named in InitialTypeName.
-                element = xamlHost.Child as Windows.UI.Xaml.Controls.CaptureElement
-                    ?? throw new InvalidOperationException("Elemen pratinjau XAML tidak terbentuk.");
-            }
-            catch (Exception ex)
-            {
-                // XAML Islands touches several Windows components and fails with different exception
-                // types; whatever the reason, this mode is unusable and the next one is tried.
-                await FailOrRetryAsync(
-                    modeIndex,
-                    $"XAML Islands gagal dimulai: {ex.GetType().Name}: {ex.Message}",
-                    $"Pratinjau XAML gagal dimulai.\n\n{ex.Message}");
-                return;
-            }
-        }
-
         Log($"Membuka {choice} ({CameraSession.Describe(mode)})");
-        var start = CameraSession.StartAsync(choice.Group, mode, OnFrame, element);
+        var start = CameraSession.StartAsync(choice.Group, mode, OnFrame);
         try
         {
             var finished = await Task.WhenAny(start, Task.Delay(OpenTimeout, token));
@@ -342,11 +296,7 @@ internal sealed class MainForm : Form
             session = started;
             sessionStartedAt = DateTime.UtcNow;
             Log($"{choice}: terbuka ({started.FormatInfo}), menunggu gambar");
-            if (started.IsXamlPreview)
-            {
-                SetState(CameraState.Running, activeCameraName);
-            }
-            if (started.SupportedFormats.Length > 0)
+            if (modeIndex == 0 && started.SupportedFormats.Length > 0)
             {
                 Log($"Kamera: {started.SupportedFormats}");
             }
@@ -509,36 +459,14 @@ internal sealed class MainForm : Form
         }
     }
 
-    private async Task CapturePhotoAsync()
+    private void CapturePhoto()
     {
-        Bitmap? grabbed = null;
-        try
+        if (preview.Image is not Bitmap current)
         {
-            if (session is { IsXamlPreview: true } xaml)
-            {
-                grabbed = (await xaml.GrabPreviewFrameAsync())?.Bitmap;
-            }
+            statusLabel.Text = "Belum ada gambar dari kamera. Tunggu sebentar lalu coba lagi.";
+            return;
+        }
 
-            var current = grabbed ?? preview.Image as Bitmap;
-            if (current is null)
-            {
-                statusLabel.Text = "Belum ada gambar dari kamera. Tunggu sebentar lalu coba lagi.";
-                return;
-            }
-            SavePhoto(current);
-        }
-        catch (Exception ex) when (ex is COMException or InvalidOperationException)
-        {
-            statusLabel.Text = $"Gagal mengambil gambar dari kamera: {ex.Message}";
-        }
-        finally
-        {
-            grabbed?.Dispose();
-        }
-    }
-
-    private void SavePhoto(Bitmap current)
-    {
         try
         {
             Directory.CreateDirectory(photoFolder);
@@ -638,27 +566,66 @@ internal sealed class MainForm : Form
         sb.AppendLine($"- Akses kamera, seluruh perangkat: {ReadConsent(Registry.LocalMachine, root)}");
         sb.AppendLine($"- Aplikasi desktop, pengguna: {ReadConsent(Registry.CurrentUser, root + @"\NonPackaged")}");
         sb.AppendLine($"- Aplikasi desktop, seluruh perangkat: {ReadConsent(Registry.LocalMachine, root + @"\NonPackaged")}");
-        sb.AppendLine("Aplikasi desktop yang tercatat memakai kamera:");
+        AppendConsentApps(sb, "Aplikasi desktop yang tercatat memakai kamera:", root + @"\NonPackaged", _ => true);
+        AppendConsentApps(
+            sb,
+            "Aplikasi paket (Store/MSIX) yang tercatat memakai kamera:",
+            root,
+            name => name != "NonPackaged");
+        sb.AppendLine("(\"masih dipakai\" berarti aplikasi itu sedang memegang kamera sekarang.)");
+        sb.AppendLine();
+        AppendCameraRelatedProcesses(sb);
+    }
+
+    private static void AppendConsentApps(StringBuilder sb, string title, string path, Func<string, bool> include)
+    {
+        sb.AppendLine(title);
         try
         {
-            using var apps = Registry.CurrentUser.OpenSubKey(root + @"\NonPackaged");
-            var names = apps?.GetSubKeyNames() ?? Array.Empty<string>();
-            if (names.Length == 0)
+            using var key = Registry.CurrentUser.OpenSubKey(path);
+            var names = (key?.GetSubKeyNames() ?? Array.Empty<string>()).Where(include).ToList();
+            if (names.Count == 0)
             {
                 sb.AppendLine("(tidak ada)");
+                return;
             }
-            foreach (var name in names.Take(30))
+            foreach (var name in names.Take(40))
             {
-                using var app = apps!.OpenSubKey(name);
+                using var app = key!.OpenSubKey(name);
                 var value = app?.GetValue("Value") as string ?? "?";
                 var started = app?.GetValue("LastUsedTimeStart") as long? ?? 0;
                 var stopped = app?.GetValue("LastUsedTimeStop") as long? ?? 0;
                 var last = started == 0 ? "belum pernah" : DateTime.FromFileTime(started).ToString("yyyy-MM-dd HH:mm:ss");
-                var inUse = started != 0 && stopped == 0 ? ", masih dipakai" : "";
+                var inUse = started != 0 && stopped == 0 ? ", MASIH DIPAKAI" : "";
                 sb.AppendLine($"- {name.Replace('#', '\\')}: {value}, terakhir {last}{inUse}");
             }
         }
         catch (Exception ex) when (ex is System.Security.SecurityException or UnauthorizedAccessException or IOException)
+        {
+            sb.AppendLine($"(gagal membaca: {ex.Message})");
+        }
+    }
+
+    // Programs that commonly hold or filter the camera in the background. Only names are listed.
+    private static void AppendCameraRelatedProcesses(StringBuilder sb)
+    {
+        string[] keywords =
+        {
+            "camera", "teams", "zoom", "webex", "skype", "discord", "obs", "lenovo", "vantage", "intel",
+            "phone", "yourphone", "unison", "studioeffects", "hello", "presence",
+        };
+        sb.AppendLine("Proses berjalan yang mungkin memakai atau menyaring kamera:");
+        try
+        {
+            var names = Process.GetProcesses()
+                .Select(p => p.ProcessName)
+                .Where(n => keywords.Any(k => n.IndexOf(k, StringComparison.OrdinalIgnoreCase) >= 0))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            sb.AppendLine(names.Count == 0 ? "(tidak ada)" : string.Join(", ", names));
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
         {
             sb.AppendLine($"(gagal membaca: {ex.Message})");
         }

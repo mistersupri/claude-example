@@ -3,27 +3,27 @@ using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
 using System.Runtime.InteropServices.WindowsRuntime;
 using Windows.Graphics.Imaging;
-using Windows.Media;
 using Windows.Media.Capture;
 using Windows.Media.Capture.Frames;
 using Windows.Media.MediaProperties;
+using Windows.Storage.Streams;
 
 namespace WebcamTest;
 
 /// <summary>Ways to read a camera; some drivers only deliver frames in one of them.</summary>
 internal enum CaptureMode
 {
-    /// <summary>
-    /// The pipeline the Windows Camera app uses: a XAML CaptureElement shows the preview and
-    /// photos are taken from the preview frames.
-    /// </summary>
-    XamlPreview,
-
-    /// <summary>Shared access to the preview stream through a frame reader.</summary>
+    /// <summary>Shared access to the preview stream, the one the Windows Camera app shows.</summary>
     SharedPreview,
 
-    /// <summary>Shared access to the video-record stream through a frame reader.</summary>
+    /// <summary>Shared access to the video-record stream.</summary>
     SharedRecord,
+
+    /// <summary>
+    /// No video stream: take still photos one after another and show them as the preview.
+    /// Slower, but needs neither the preview nor the record stream to deliver frames.
+    /// </summary>
+    PhotoPolling,
 
     /// <summary>Exclusive control of the camera, preview stream.</summary>
     ExclusivePreview,
@@ -32,38 +32,20 @@ internal enum CaptureMode
     SharedAnyColor,
 }
 
-/// <summary>A picture taken from the camera and whether it is all black.</summary>
-internal readonly struct GrabbedFrame
-{
-    public GrabbedFrame(Bitmap bitmap, bool black)
-    {
-        Bitmap = bitmap;
-        Black = black;
-    }
-
-    public Bitmap Bitmap { get; }
-
-    public bool Black { get; }
-}
-
 /// <summary>
 /// One running camera, read through the Windows MediaCapture API (the same stack as the Camera app).
-/// Frame-reader modes deliver pictures on a thread-pool thread through the callback given to
-/// <see cref="StartAsync"/>; the XAML preview mode shows the video itself and delivers pictures on request.
+/// Frames arrive on a thread-pool thread through the callback given to <see cref="StartAsync"/>.
 /// </summary>
 internal sealed class CameraSession : IDisposable
 {
     private const double BlackMeanThreshold = 2.0;
     private const int MaxListedFormats = 24;
-    private const int DefaultPreviewWidth = 1280;
-    private const int DefaultPreviewHeight = 720;
 
     private readonly MediaCapture capture;
     private readonly MediaFrameReader? reader;
+    private CancellationTokenSource? photoCts;
+    private Task? photoTask;
     private readonly Action<Bitmap, bool> onFrame;
-    private readonly Windows.UI.Xaml.Controls.CaptureElement? captureElement;
-    private readonly int previewWidth;
-    private readonly int previewHeight;
     private int converting;
     private bool disposed;
     private int eventCount;
@@ -73,17 +55,13 @@ internal sealed class CameraSession : IDisposable
 
     private CameraSession(
         MediaCapture capture, MediaFrameReader? reader, string formatInfo, string supportedFormats,
-        Action<Bitmap, bool> onFrame,
-        Windows.UI.Xaml.Controls.CaptureElement? captureElement = null, int previewWidth = 0, int previewHeight = 0)
+        Action<Bitmap, bool> onFrame)
     {
         this.capture = capture;
         this.reader = reader;
         FormatInfo = formatInfo;
         SupportedFormats = supportedFormats;
         this.onFrame = onFrame;
-        this.captureElement = captureElement;
-        this.previewWidth = previewWidth;
-        this.previewHeight = previewHeight;
     }
 
     /// <summary>Format the camera reports it is using, for example "NV12 1920x1080@30".</summary>
@@ -92,36 +70,31 @@ internal sealed class CameraSession : IDisposable
     /// <summary>Streams and formats the camera offers, for the log.</summary>
     public string SupportedFormats { get; }
 
-    /// <summary>True when the video is shown by the XAML preview element instead of delivered as frames.</summary>
-    public bool IsXamlPreview => captureElement is not null;
-
     /// <summary>Counters that show where frames get lost, for the log.</summary>
     public string Diagnostics =>
         $"gambar diterima={eventCount}, kosong={emptyCount}, terkonversi={convertedCount}, galat terakhir={lastError ?? "-"}";
 
     public static string Describe(CaptureMode mode) => mode switch
     {
-        CaptureMode.XamlPreview => "pratinjau XAML, seperti aplikasi Camera",
         CaptureMode.SharedPreview => "bagi pakai, aliran pratinjau",
         CaptureMode.SharedRecord => "bagi pakai, aliran rekam",
+        CaptureMode.PhotoPolling => "foto berulang, tanpa aliran video",
         CaptureMode.ExclusivePreview => "kendali penuh, aliran pratinjau",
         CaptureMode.SharedAnyColor => "bagi pakai, aliran berwarna pertama",
         _ => mode.ToString(),
     };
 
     /// <param name="onFrame">Receives a new bitmap (the receiver owns it) and whether it is all black.</param>
-    /// <param name="element">The preview element; only used by <see cref="CaptureMode.XamlPreview"/>.</param>
     /// <exception cref="NotSupportedException">This mode does not apply to this camera.</exception>
     public static async Task<CameraSession> StartAsync(
-        MediaFrameSourceGroup group, CaptureMode mode, Action<Bitmap, bool> onFrame,
-        Windows.UI.Xaml.Controls.CaptureElement? element)
+        MediaFrameSourceGroup group, CaptureMode mode, Action<Bitmap, bool> onFrame)
     {
         var capture = new MediaCapture();
         try
         {
-            if (mode == CaptureMode.XamlPreview)
+            if (mode == CaptureMode.PhotoPolling)
             {
-                return await StartXamlPreviewAsync(capture, group, element, onFrame);
+                return await StartPhotoPollingAsync(capture, group, onFrame);
             }
 
             var exclusive = mode == CaptureMode.ExclusivePreview;
@@ -160,13 +133,13 @@ internal sealed class CameraSession : IDisposable
                 ? "format tidak diketahui"
                 : $"{format.Subtype} {format.VideoFormat.Width}x{format.VideoFormat.Height}@{FramesPerSecond(format):0}";
 
-            var frameReader = await capture.CreateFrameReaderAsync(source, MediaEncodingSubtypes.Bgra8);
-            frameReader.AcquisitionMode = MediaFrameReaderAcquisitionMode.Realtime;
+            var reader = await capture.CreateFrameReaderAsync(source, MediaEncodingSubtypes.Bgra8);
+            reader.AcquisitionMode = MediaFrameReaderAcquisitionMode.Realtime;
 
-            var session = new CameraSession(capture, frameReader, formatInfo, supported, onFrame);
-            frameReader.FrameArrived += session.OnFrameArrived;
+            var session = new CameraSession(capture, reader, formatInfo, supported, onFrame);
+            reader.FrameArrived += session.OnFrameArrived;
 
-            var status = await frameReader.StartAsync();
+            var status = await reader.StartAsync();
             if (status != MediaFrameReaderStartStatus.Success)
             {
                 session.Dispose();
@@ -181,92 +154,8 @@ internal sealed class CameraSession : IDisposable
         }
     }
 
-    private static async Task<CameraSession> StartXamlPreviewAsync(
-        MediaCapture capture, MediaFrameSourceGroup group,
-        Windows.UI.Xaml.Controls.CaptureElement? element, Action<Bitmap, bool> onFrame)
-    {
-        if (element is null)
-        {
-            throw new NotSupportedException("Elemen pratinjau XAML belum siap.");
-        }
-        var device = group.SourceInfos
-            .FirstOrDefault(i => i.SourceKind == MediaFrameSourceKind.Color)?.DeviceInformation
-            ?? throw new NotSupportedException("Kamera ini tidak punya ID perangkat untuk pratinjau XAML.");
-
-        try
-        {
-            await capture.InitializeAsync(new MediaCaptureInitializationSettings
-            {
-                VideoDeviceId = device.Id,
-                StreamingCaptureMode = StreamingCaptureMode.Video,
-            });
-            element.Source = capture;
-            await capture.StartPreviewAsync();
-        }
-        catch
-        {
-            element.Source = null;
-            throw;
-        }
-
-        var properties = capture.VideoDeviceController
-            .GetMediaStreamProperties(MediaStreamType.VideoPreview) as VideoEncodingProperties;
-        var width = properties is { Width: > 0 } ? (int)properties.Width : DefaultPreviewWidth;
-        var height = properties is { Height: > 0 } ? (int)properties.Height : DefaultPreviewHeight;
-        var info = properties is null
-            ? "pratinjau XAML"
-            : $"{properties.Subtype} {width}x{height}, pratinjau XAML";
-
-        var session = new CameraSession(capture, null, info, "", onFrame, element, width, height);
-        _ = session.ProbeAsync();
-        return session;
-    }
-
     private static double FramesPerSecond(MediaFrameFormat format) =>
         format.FrameRate is { Denominator: > 0 } rate ? (double)rate.Numerator / rate.Denominator : 0;
-
-    /// <summary>
-    /// Takes one picture from the running XAML preview. Returns null when Windows hands back no bitmap.
-    /// </summary>
-    public async Task<GrabbedFrame?> GrabPreviewFrameAsync()
-    {
-        using var target = new VideoFrame(BitmapPixelFormat.Bgra8, previewWidth, previewHeight);
-        using var result = await capture.GetPreviewFrameAsync(target);
-        Interlocked.Increment(ref eventCount);
-
-        var software = result.SoftwareBitmap;
-        if (software is null)
-        {
-            Interlocked.Increment(ref emptyCount);
-            return null;
-        }
-        var bitmap = ToBitmap(software, out var black);
-        Interlocked.Increment(ref convertedCount);
-        return new GrabbedFrame(bitmap, black);
-    }
-
-    // The video is drawn by the XAML element, so this one test picture only shows in the log whether
-    // Windows can also hand pictures to this app, and lets the UI warn when they are black.
-    private async Task ProbeAsync()
-    {
-        try
-        {
-            await Task.Delay(1500);
-            if (disposed)
-            {
-                return;
-            }
-            if (await GrabPreviewFrameAsync() is { } grabbed)
-            {
-                onFrame(grabbed.Bitmap, grabbed.Black);
-            }
-        }
-        catch (Exception ex)
-        {
-            // Nothing to propagate to: this runs in the background and only feeds the diagnostics.
-            lastError = $"{ex.GetType().Name}: {ex.Message}";
-        }
-    }
 
     public async Task StopAsync()
     {
@@ -274,32 +163,24 @@ internal sealed class CameraSession : IDisposable
         {
             return;
         }
+
+        photoCts?.Cancel();
         try
         {
+            if (photoTask is not null)
+            {
+                // A photo call that is stuck in the driver must not block closing the camera.
+                await Task.WhenAny(photoTask, Task.Delay(TimeSpan.FromSeconds(2)));
+            }
             if (reader is not null)
             {
                 reader.FrameArrived -= OnFrameArrived;
                 await reader.StopAsync();
             }
-            if (captureElement is not null)
-            {
-                await capture.StopPreviewAsync();
-            }
         }
         catch (Exception ex) when (ex is COMException or InvalidOperationException or ObjectDisposedException)
         {
             // The camera was already gone (unplugged or taken by another app); disposing below is enough.
-        }
-        try
-        {
-            if (captureElement is not null)
-            {
-                captureElement.Source = null;
-            }
-        }
-        catch (COMException)
-        {
-            // The XAML element is already torn down.
         }
         Dispose();
     }
@@ -311,12 +192,92 @@ internal sealed class CameraSession : IDisposable
             return;
         }
         disposed = true;
+        photoCts?.Cancel();
         if (reader is not null)
         {
             reader.FrameArrived -= OnFrameArrived;
             reader.Dispose();
         }
         capture.Dispose();
+    }
+
+    private static async Task<CameraSession> StartPhotoPollingAsync(
+        MediaCapture capture, MediaFrameSourceGroup group, Action<Bitmap, bool> onFrame)
+    {
+        var device = group.SourceInfos
+            .FirstOrDefault(i => i.SourceKind == MediaFrameSourceKind.Color)?.DeviceInformation
+            ?? throw new NotSupportedException("Kamera ini tidak punya ID perangkat untuk foto berulang.");
+
+        await capture.InitializeAsync(new MediaCaptureInitializationSettings
+        {
+            VideoDeviceId = device.Id,
+            StreamingCaptureMode = StreamingCaptureMode.Video,
+        });
+
+        var session = new CameraSession(capture, null, "foto JPEG berulang", "", onFrame);
+        session.StartPhotoLoop();
+        return session;
+    }
+
+    private void StartPhotoLoop()
+    {
+        var cts = new CancellationTokenSource();
+        photoCts = cts;
+        photoTask = Task.Run(() => PhotoLoopAsync(cts.Token));
+    }
+
+    private async Task PhotoLoopAsync(CancellationToken token)
+    {
+        try
+        {
+            while (!token.IsCancellationRequested)
+            {
+                try
+                {
+                    using var stream = new InMemoryRandomAccessStream();
+                    await capture.CapturePhotoToStreamAsync(ImageEncodingProperties.CreateJpeg(), stream);
+                    Interlocked.Increment(ref eventCount);
+
+                    stream.Seek(0);
+                    using var input = stream.AsStreamForRead();
+                    using var buffer = new MemoryStream();
+                    await input.CopyToAsync(buffer, token);
+                    buffer.Position = 0;
+                    using var decoded = new Bitmap(buffer);
+                    var bitmap = new Bitmap(decoded);
+
+                    Interlocked.Increment(ref convertedCount);
+                    onFrame(bitmap, IsBlack(bitmap));
+                    await Task.Delay(30, token);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    // Keep trying; the reason is shown in the diagnostics.
+                    lastError = $"{ex.GetType().Name}: {ex.Message}";
+                    await Task.Delay(500, token);
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Stopped on purpose.
+        }
+    }
+
+    private static bool IsBlack(Bitmap bitmap)
+    {
+        const int size = 16;
+        using var small = new Bitmap(bitmap, size, size);
+        long sum = 0;
+        for (var y = 0; y < size; y++)
+        {
+            for (var x = 0; x < size; x++)
+            {
+                var pixel = small.GetPixel(x, y);
+                sum += pixel.R + pixel.G + pixel.B;
+            }
+        }
+        return sum / (double)(size * size * 3) < BlackMeanThreshold;
     }
 
     private async void OnFrameArrived(MediaFrameReader sender, MediaFrameArrivedEventArgs args)

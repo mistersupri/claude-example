@@ -2,28 +2,18 @@
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <!-- .NET Framework 4.8: the supported way to host the Windows Camera app's preview control
-         (UWP XAML) in a WinForms window. Windows 10 and 11 ship with it. -->
-    <TargetFramework>net48</TargetFramework>
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
     <UseWindowsForms>true</UseWindowsForms>
-    <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <AssemblyName>WebcamTest</AssemblyName>
     <RootNamespace>WebcamTest</RootNamespace>
     <Version>1.0.0</Version>
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- net48 has no System.Net.Http reference by default, which the implicit usings would need. -->
-    <Using Remove="System.Net.Http" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <PackageReference Include="Microsoft.Toolkit.Forms.UI.XamlHost" Version="6.1.2" />
-    <Reference Include="System.Management" />
-    <Reference Include="System.Runtime.WindowsRuntime" />
+    <PackageReference Include="System.Management" Version="8.0.0" />
   </ItemGroup>
 
 </Project>
