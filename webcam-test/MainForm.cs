@@ -4,6 +4,7 @@ using System.Management;
 using System.Runtime.InteropServices;
 using System.Security.Principal;
 using System.Text;
+using Microsoft.Toolkit.Forms.UI.XamlHost;
 using Microsoft.Win32;
 using Windows.Media.Capture.Frames;
 
@@ -13,8 +14,18 @@ internal sealed class MainForm : Form
 {
     private enum CameraState { Idle, Opening, Running, Error }
 
-    private sealed record CameraChoice(MediaFrameSourceGroup Group, bool HasColor)
+    private sealed class CameraChoice
     {
+        public CameraChoice(MediaFrameSourceGroup group, bool hasColor)
+        {
+            Group = group;
+            HasColor = hasColor;
+        }
+
+        public MediaFrameSourceGroup Group { get; }
+
+        public bool HasColor { get; }
+
         public override string ToString() =>
             HasColor ? Group.DisplayName : $"{Group.DisplayName} (inframerah)";
     }
@@ -25,7 +36,7 @@ internal sealed class MainForm : Form
     private const int MaxLogLines = 60;
 
     // Tried in this order when a camera opens but sends no pictures.
-    private static readonly CaptureMode[] Modes = Enum.GetValues<CaptureMode>();
+    private static readonly CaptureMode[] Modes = (CaptureMode[])Enum.GetValues(typeof(CaptureMode));
 
     private static readonly ImageCodecInfo JpegCodec =
         ImageCodecInfo.GetImageEncoders().First(c => c.FormatID == ImageFormat.Jpeg.Guid);
@@ -51,8 +62,9 @@ internal sealed class MainForm : Form
     };
 
     // The Windows Camera app's preview control, hosted through XAML Islands. Hidden until a camera uses it.
-    private readonly XamlCaptureHost xamlHost = new()
+    private readonly WindowsXamlHost xamlHost = new()
     {
+        InitialTypeName = "Windows.UI.Xaml.Controls.CaptureElement",
         Dock = DockStyle.Fill,
         BackColor = Color.Black,
         Visible = false,
@@ -284,8 +296,9 @@ internal sealed class MainForm : Form
         {
             try
             {
-                xamlHost.EnsureCreated();
-                element = xamlHost.Element;
+                _ = xamlHost.Handle; // Creates the XAML island and the CaptureElement named in InitialTypeName.
+                element = xamlHost.Child as Windows.UI.Xaml.Controls.CaptureElement
+                    ?? throw new InvalidOperationException("Elemen pratinjau XAML tidak terbentuk.");
             }
             catch (Exception ex)
             {

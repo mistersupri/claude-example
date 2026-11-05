@@ -26,21 +26,17 @@ jobs:
         with:
           dotnet-version: "8.0.x"
 
-      - name: Publish single-file exe
+      - name: Build
         run: >
           dotnet publish WebcamTest.csproj
           -c Release
-          -r win-x64
-          --self-contained true
-          -p:PublishSingleFile=true
-          -p:EnableCompressionInSingleFile=true
           -p:DebugType=none
           -p:Version=${{ env.VERSION }}
           -o publish
 
       - name: Zip
         shell: pwsh
-        run: Compress-Archive -Path publish/* -DestinationPath WebcamTest-win-x64.zip
+        run: Compress-Archive -Path publish/* -DestinationPath WebcamTest.zip
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
@@ -51,9 +47,9 @@ jobs:
           body: |
             Build dari commit ${{ github.sha }} (branch `${{ github.ref_name }}`).
 
-            Cara pakai: unduh `WebcamTest.exe`, lalu klik dua kali. Tidak perlu memasang .NET.
+            Cara pakai: unduh `WebcamTest.zip`, ekstrak semua isinya ke satu folder, lalu klik dua kali `WebcamTest.exe`.
+            Butuh Windows 10 versi 1903 atau lebih baru (.NET Framework 4.8 sudah termasuk).
             Windows SmartScreen mungkin menampilkan peringatan karena exe ini tidak ditandatangani: pilih "More info" lalu "Run anyway".
             Foto tersimpan di folder `Pictures\WebcamTest`.
           files: |
-            webcam-test/publish/WebcamTest.exe
-            webcam-test/WebcamTest-win-x64.zip
+            webcam-test/WebcamTest.zip

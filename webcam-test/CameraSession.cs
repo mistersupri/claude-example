@@ -33,7 +33,18 @@ internal enum CaptureMode
 }
 
 /// <summary>A picture taken from the camera and whether it is all black.</summary>
-internal readonly record struct GrabbedFrame(Bitmap Bitmap, bool Black);
+internal readonly struct GrabbedFrame
+{
+    public GrabbedFrame(Bitmap bitmap, bool black)
+    {
+        Bitmap = bitmap;
+        Black = black;
+    }
+
+    public Bitmap Bitmap { get; }
+
+    public bool Black { get; }
+}
 
 /// <summary>
 /// One running camera, read through the Windows MediaCapture API (the same stack as the Camera app).

@@ -7,8 +7,8 @@ Status tampilan: **draft tanpa arahan desain** (belum ada `DESIGN.md`). UI memak
 ## Cara mencoba
 
 1. Buka halaman **Releases** di repo ini, pilih rilis `webcam-test-v1.0.x` terbaru.
-2. Unduh `WebcamTest.exe` (atau `WebcamTest-win-x64.zip` lalu ekstrak).
-3. Klik dua kali `WebcamTest.exe`. Tidak perlu memasang .NET.
+2. Unduh `WebcamTest.zip` dan **ekstrak semua isinya** ke satu folder (jangan jalankan exe langsung dari dalam zip).
+3. Klik dua kali `WebcamTest.exe`. Butuh Windows 10 versi 1903 atau lebih baru; .NET Framework 4.8 sudah termasuk di Windows.
    Exe ini tidak ditandatangani, jadi SmartScreen bisa muncul: pilih **More info**, lalu **Run anyway**.
 
 ## Pemakaian
@@ -34,7 +34,7 @@ Aplikasi ini memakai API kamera resmi Windows (`MediaCapture`). Cara pertama yan
 
 ## Build sendiri
 
-Butuh Windows dan .NET 8 SDK.
+Butuh Windows dan .NET SDK 8 (untuk perintah `dotnet`; aplikasinya sendiri berjalan di .NET Framework 4.8).
 
 ```powershell
 cd webcam-test
@@ -44,15 +44,14 @@ dotnet run
 Build rilis yang sama dengan GitHub Actions:
 
 ```powershell
-dotnet publish WebcamTest.csproj -c Release -r win-x64 --self-contained true `
-  -p:PublishSingleFile=true -o publish
+dotnet publish WebcamTest.csproj -c Release -o publish
 ```
 
 ## Rilis otomatis
 
-Workflow `.github/workflows/webcam-test-release.yml` berjalan setiap ada push yang mengubah folder `webcam-test/` (atau lewat tombol **Run workflow** di tab Actions). Workflow ini membangun exe di runner Windows dan membuat GitHub Release baru dengan tag `webcam-test-v1.0.<nomor run>`.
+Workflow `.github/workflows/webcam-test-release.yml` berjalan setiap ada push yang mengubah folder `webcam-test/` (atau lewat tombol **Run workflow** di tab Actions). Workflow ini membangun aplikasi di runner Windows dan membuat GitHub Release baru berisi `WebcamTest.zip`, dengan tag `webcam-test-v1.0.<nomor run>`.
 
 ## Teknologi
 
-- .NET 8 Windows Forms: jendela native Windows, tanpa runtime tambahan karena dipublish self-contained.
-- Windows `MediaCapture` dengan `MediaFrameReader` untuk membaca kamera (butuh Windows 10 versi 2004 atau lebih baru).
+- .NET Framework 4.8 Windows Forms. Dipilih karena itu cara yang didukung untuk menempelkan kontrol pratinjau kamera milik Windows (UWP XAML `CaptureElement`) ke jendela WinForms lewat XAML Islands (`Microsoft.Toolkit.Forms.UI.XamlHost`). Proyeksi Windows SDK untuk .NET 5 ke atas tidak menyertakan `Windows.UI.Xaml`.
+- Windows `MediaCapture` untuk membaca kamera (butuh Windows 10 versi 1903 atau lebih baru).
