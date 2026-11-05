@@ -25,10 +25,10 @@ Foto tersimpan di `%USERPROFILE%\Pictures\WebcamTest\foto-YYYYMMDD-HHMMSS-mmm.jp
 
 ## Jika kamera tidak muncul atau gambar hitam
 
-Aplikasi ini memakai API kamera resmi Windows (`MediaCapture`), sama seperti aplikasi Camera bawaan, dan memberi pesan yang spesifik:
+Aplikasi ini memakai API kamera resmi Windows (`MediaCapture`). Cara pertama yang dicoba adalah **pratinjau XAML**: kontrol `CaptureElement` yang sama dengan aplikasi Camera bawaan, dipasang di jendela lewat XAML Islands. Foto diambil dari bingkai pratinjau itu. Jika cara ini gagal, aplikasi mencoba cara lain dan memberi pesan yang spesifik:
 
 - **Windows menolak akses kamera**: Settings > Privacy & security > Camera, nyalakan **Camera access** dan **Let desktop apps access your camera**.
-- **Tidak merespons saat dibuka (15 detik)** atau **terbuka tetapi tidak ada gambar**: aplikasi menunggu 8 detik, lalu otomatis mencoba cara lain (aliran rekam, foto berulang tanpa aliran video, kendali penuh, dan aliran berwarna pertama) sebelum menyerah: restart layanan **Windows Camera Frame Server** di `services.msc`, dan tutup aplikasi lain yang memakai kamera.
+- **Tidak merespons saat dibuka (15 detik)** atau **terbuka tetapi tidak ada gambar**: aplikasi menunggu 8 detik, lalu otomatis mencoba cara lain (aliran pratinjau, aliran rekam, kendali penuh, dan aliran berwarna pertama) sebelum menyerah: restart layanan **Windows Camera Frame Server** di `services.msc`, dan tutup aplikasi lain yang memakai kamera.
 - **Gambar masih hitam setelah 6 detik**: cek penutup lensa atau tombol kamera di keyboard, matikan efek kamera (Windows Studio Effects, aplikasi kamera pabrikan) di Settings > Bluetooth & devices > Cameras, atau pilih kamera lain di daftar.
 - Tekan **Info perangkat** untuk melihat catatan sesi, lalu salin dan kirim saat melapor masalah.
 

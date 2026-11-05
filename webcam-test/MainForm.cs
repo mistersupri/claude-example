@@ -50,6 +50,14 @@ internal sealed class MainForm : Form
         BackColor = Color.Black,
     };
 
+    // The Windows Camera app's preview control, hosted through XAML Islands. Hidden until a camera uses it.
+    private readonly XamlCaptureHost xamlHost = new()
+    {
+        Dock = DockStyle.Fill,
+        BackColor = Color.Black,
+        Visible = false,
+    };
+
     private readonly ToolStripStatusLabel statusLabel = new()
     {
         Spring = true,
@@ -109,13 +117,14 @@ internal sealed class MainForm : Form
         statusStrip.Items.Add(statusLabel);
 
         Controls.Add(preview);
+        Controls.Add(xamlHost);
         Controls.Add(toolbar);
         Controls.Add(statusStrip);
 
         AcceptButton = captureButton;
 
         toggleButton.Click += async (_, _) => await ToggleCameraAsync();
-        captureButton.Click += (_, _) => CapturePhoto();
+        captureButton.Click += async (_, _) => await CapturePhotoAsync();
         openFolderButton.Click += (_, _) => OpenPhotoFolder();
         infoButton.Click += async (_, _) => await ShowDeviceInfoAsync();
         watchdog.Tick += async (_, _) => await WatchdogTickAsync();
@@ -188,6 +197,10 @@ internal sealed class MainForm : Form
         toggleButton.Enabled = busy || hasCameras;
         toggleButton.Text = busy ? "&Matikan kamera" : "&Nyalakan kamera";
         captureButton.Enabled = running;
+
+        var showXaml = running && session is { IsXamlPreview: true };
+        xamlHost.Visible = showXaml;
+        preview.Visible = !showXaml;
 
         if (running)
         {
@@ -266,8 +279,28 @@ internal sealed class MainForm : Form
         startCts = cts;
         var token = cts.Token;
 
+        Windows.UI.Xaml.Controls.CaptureElement? element = null;
+        if (mode == CaptureMode.XamlPreview)
+        {
+            try
+            {
+                xamlHost.EnsureCreated();
+                element = xamlHost.Element;
+            }
+            catch (Exception ex)
+            {
+                // XAML Islands touches several Windows components and fails with different exception
+                // types; whatever the reason, this mode is unusable and the next one is tried.
+                await FailOrRetryAsync(
+                    modeIndex,
+                    $"XAML Islands gagal dimulai: {ex.GetType().Name}: {ex.Message}",
+                    $"Pratinjau XAML gagal dimulai.\n\n{ex.Message}");
+                return;
+            }
+        }
+
         Log($"Membuka {choice} ({CameraSession.Describe(mode)})");
-        var start = CameraSession.StartAsync(choice.Group, mode, OnFrame);
+        var start = CameraSession.StartAsync(choice.Group, mode, OnFrame, element);
         try
         {
             var finished = await Task.WhenAny(start, Task.Delay(OpenTimeout, token));
@@ -296,7 +329,11 @@ internal sealed class MainForm : Form
             session = started;
             sessionStartedAt = DateTime.UtcNow;
             Log($"{choice}: terbuka ({started.FormatInfo}), menunggu gambar");
-            if (modeIndex == 0 && started.SupportedFormats.Length > 0)
+            if (started.IsXamlPreview)
+            {
+                SetState(CameraState.Running, activeCameraName);
+            }
+            if (started.SupportedFormats.Length > 0)
             {
                 Log($"Kamera: {started.SupportedFormats}");
             }
@@ -459,14 +496,36 @@ internal sealed class MainForm : Form
         }
     }
 
-    private void CapturePhoto()
+    private async Task CapturePhotoAsync()
     {
-        if (preview.Image is not Bitmap current)
+        Bitmap? grabbed = null;
+        try
         {
-            statusLabel.Text = "Belum ada gambar dari kamera. Tunggu sebentar lalu coba lagi.";
-            return;
-        }
+            if (session is { IsXamlPreview: true } xaml)
+            {
+                grabbed = (await xaml.GrabPreviewFrameAsync())?.Bitmap;
+            }
 
+            var current = grabbed ?? preview.Image as Bitmap;
+            if (current is null)
+            {
+                statusLabel.Text = "Belum ada gambar dari kamera. Tunggu sebentar lalu coba lagi.";
+                return;
+            }
+            SavePhoto(current);
+        }
+        catch (Exception ex) when (ex is COMException or InvalidOperationException)
+        {
+            statusLabel.Text = $"Gagal mengambil gambar dari kamera: {ex.Message}";
+        }
+        finally
+        {
+            grabbed?.Dispose();
+        }
+    }
+
+    private void SavePhoto(Bitmap current)
+    {
         try
         {
             Directory.CreateDirectory(photoFolder);
