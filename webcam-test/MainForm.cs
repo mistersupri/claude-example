@@ -298,7 +298,7 @@ internal sealed class MainForm : Form
             Log($"{choice}: terbuka ({started.FormatInfo}), menunggu gambar");
             if (modeIndex == 0 && started.SupportedFormats.Length > 0)
             {
-                Log($"Format yang didukung kamera: {started.SupportedFormats}");
+                Log($"Kamera: {started.SupportedFormats}");
             }
         }
         catch (UnauthorizedAccessException)

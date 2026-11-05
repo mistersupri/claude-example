@@ -12,17 +12,17 @@ namespace WebcamTest;
 /// <summary>Ways to read a camera; some drivers only deliver frames in one of them.</summary>
 internal enum CaptureMode
 {
-    /// <summary>Shared access, the camera's default format, CPU memory.</summary>
-    SharedBgra,
+    /// <summary>Shared access to the preview stream, the one the Windows Camera app shows.</summary>
+    SharedPreview,
 
-    /// <summary>Same, but lets Windows choose the memory type (GPU surfaces allowed).</summary>
-    SharedAutoMemory,
+    /// <summary>Shared access to the video-record stream.</summary>
+    SharedRecord,
 
-    /// <summary>Exclusive control with the camera switched to a 720p format.</summary>
-    Exclusive720,
+    /// <summary>Exclusive control of the camera, preview stream.</summary>
+    ExclusivePreview,
 
-    /// <summary>Exclusive control with the camera switched to a 480p format.</summary>
-    Exclusive480,
+    /// <summary>Shared access to whichever colour stream comes first (last resort).</summary>
+    SharedAnyColor,
 }
 
 /// <summary>
@@ -58,7 +58,7 @@ internal sealed class CameraSession : IDisposable
     /// <summary>Format the camera reports it is using, for example "NV12 1920x1080@30".</summary>
     public string FormatInfo { get; }
 
-    /// <summary>Formats the camera offers, for the log.</summary>
+    /// <summary>Streams and formats the camera offers, for the log.</summary>
     public string SupportedFormats { get; }
 
     /// <summary>Counters that show where frames get lost, for the log.</summary>
@@ -67,10 +67,10 @@ internal sealed class CameraSession : IDisposable
 
     public static string Describe(CaptureMode mode) => mode switch
     {
-        CaptureMode.SharedBgra => "bagi pakai, format bawaan",
-        CaptureMode.SharedAutoMemory => "bagi pakai, memori otomatis",
-        CaptureMode.Exclusive720 => "kendali penuh, 720p",
-        CaptureMode.Exclusive480 => "kendali penuh, 480p",
+        CaptureMode.SharedPreview => "bagi pakai, aliran pratinjau",
+        CaptureMode.SharedRecord => "bagi pakai, aliran rekam",
+        CaptureMode.ExclusivePreview => "kendali penuh, aliran pratinjau",
+        CaptureMode.SharedAnyColor => "bagi pakai, aliran berwarna pertama",
         _ => mode.ToString(),
     };
 
@@ -82,34 +82,36 @@ internal sealed class CameraSession : IDisposable
         var capture = new MediaCapture();
         try
         {
-            var exclusive = mode is CaptureMode.Exclusive720 or CaptureMode.Exclusive480;
+            var exclusive = mode == CaptureMode.ExclusivePreview;
             await capture.InitializeAsync(new MediaCaptureInitializationSettings
             {
                 SourceGroup = group,
                 SharingMode = exclusive ? MediaCaptureSharingMode.ExclusiveControl : MediaCaptureSharingMode.SharedReadOnly,
-                MemoryPreference = mode == CaptureMode.SharedAutoMemory
-                    ? MediaCaptureMemoryPreference.Auto
-                    : MediaCaptureMemoryPreference.Cpu,
+                MemoryPreference = MediaCaptureMemoryPreference.Cpu,
                 StreamingCaptureMode = StreamingCaptureMode.Video,
             });
 
-            var source = capture.FrameSources.Values
-                .FirstOrDefault(s => s.Info.SourceKind == MediaFrameSourceKind.Color)
-                ?? throw new NotSupportedException("Kamera ini tidak punya aliran gambar berwarna (kemungkinan kamera inframerah).");
+            // A camera can expose several colour streams (preview, record, photo). Only the preview
+            // and record streams deliver frames on their own, so pick the stream on purpose.
+            var colorSources = capture.FrameSources.Values
+                .Where(s => s.Info.SourceKind == MediaFrameSourceKind.Color)
+                .ToList();
+            var sources = string.Join("; ", capture.FrameSources.Values
+                .Select(s => $"{s.Info.MediaStreamType}/{s.Info.SourceKind}/{s.SupportedFormats.Count} format"));
+            var wanted = mode == CaptureMode.SharedRecord ? MediaStreamType.VideoRecord : MediaStreamType.VideoPreview;
+            var source = (mode == CaptureMode.SharedAnyColor
+                    ? colorSources.FirstOrDefault()
+                    : colorSources.FirstOrDefault(s => s.Info.MediaStreamType == wanted))
+                ?? throw new NotSupportedException(
+                    $"Kamera tidak punya aliran {(mode == CaptureMode.SharedAnyColor ? "berwarna" : wanted.ToString())}. " +
+                    $"Aliran yang ada: {sources}.");
 
-            var supported = string.Join(", ", source.SupportedFormats
+            var formats = string.Join(", ", source.SupportedFormats
                 .Where(f => f.VideoFormat is not null)
                 .Select(f => $"{f.Subtype} {f.VideoFormat!.Width}x{f.VideoFormat.Height}@{FramesPerSecond(f):0}")
                 .Distinct()
                 .Take(MaxListedFormats));
-
-            if (exclusive)
-            {
-                var height = mode == CaptureMode.Exclusive720 ? 720u : 480u;
-                var wanted = PickFormat(source, height)
-                    ?? throw new NotSupportedException($"Kamera tidak punya format {height}p.");
-                await source.SetFormatAsync(wanted);
-            }
+            var supported = $"aliran yang ada: {sources}; dipakai: {source.Info.MediaStreamType}; format: {formats}";
 
             var format = source.CurrentFormat;
             var formatInfo = format?.VideoFormat is null
@@ -136,13 +138,6 @@ internal sealed class CameraSession : IDisposable
             throw;
         }
     }
-
-    private static MediaFrameFormat? PickFormat(MediaFrameSource source, uint height) =>
-        source.SupportedFormats
-            .Where(f => f.VideoFormat is not null && f.VideoFormat.Height == height)
-            .OrderBy(f => FramesPerSecond(f) > 30.5 ? 1 : 0)
-            .ThenByDescending(FramesPerSecond)
-            .FirstOrDefault();
 
     private static double FramesPerSecond(MediaFrameFormat format) =>
         format.FrameRate is { Denominator: > 0 } rate ? (double)rate.Numerator / rate.Denominator : 0;
