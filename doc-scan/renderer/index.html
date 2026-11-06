@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; script-src 'self'">
+  <title>DocScan</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="app-header">
+    <h1>DocScan</h1>
+    <p>Pindai dokumen berurutan, simpan dengan nama dan folder dari daftar Anda.</p>
+  </header>
+
+  <main class="layout">
+    <div class="setup">
+      <section aria-labelledby="h-scanner">
+        <h2 id="h-scanner">1. Pemindai</h2>
+        <div class="row">
+          <select id="scanner" aria-label="Pemindai terpilih" disabled></select>
+          <button id="discover" type="button">Cari pemindai</button>
+        </div>
+        <p id="scanner-state" class="state" role="status" aria-live="polite">Belum ada pemindai. Klik "Cari pemindai".</p>
+
+        <details>
+          <summary>Pemindai tidak muncul? Masukkan alamat IP</summary>
+          <div class="row">
+            <input id="manual" type="text" inputmode="url" placeholder="contoh: 192.168.1.20" aria-label="Alamat IP pemindai">
+            <button id="manual-add" type="button">Tambah</button>
+          </div>
+          <p class="hint">Untuk pemindai jaringan yang mendukung AirScan (eSCL). IP ada di menu jaringan pada panel pemindai.</p>
+        </details>
+
+        <div class="grid2">
+          <label>Sumber kertas
+            <select id="source">
+              <option value="flatbed">Kaca (flatbed)</option>
+              <option value="adf">Pengumpan (ADF)</option>
+            </select>
+          </label>
+          <label>Resolusi
+            <select id="dpi">
+              <option value="150">150 dpi</option>
+              <option value="200">200 dpi</option>
+              <option value="300" selected>300 dpi</option>
+              <option value="600">600 dpi</option>
+            </select>
+          </label>
+          <label>Warna
+            <select id="color">
+              <option value="color">Berwarna</option>
+              <option value="gray">Abu-abu</option>
+            </select>
+          </label>
+          <label>Format
+            <select id="format">
+              <option value="pdf">PDF</option>
+              <option value="jpg">JPG</option>
+            </select>
+          </label>
+        </div>
+      </section>
+
+      <section aria-labelledby="h-files">
+        <h2 id="h-files">2. Daftar berkas</h2>
+        <fieldset class="modes">
+          <legend class="visually-hidden">Sumber daftar berkas</legend>
+          <label><input type="radio" name="mode" value="list" checked> Daftar nama</label>
+          <label><input type="radio" name="mode" value="table"> Tabel</label>
+        </fieldset>
+
+        <div id="panel-list">
+          <label>Satu nama berkas per baris, dipindai dari atas ke bawah
+            <textarea id="names" rows="7" spellcheck="false"></textarea>
+          </label>
+        </div>
+
+        <div id="panel-table" hidden>
+          <div class="row">
+            <button id="open-table" type="button">Buka file CSV</button>
+            <span id="table-file" class="hint">atau tempel dari Excel di bawah</span>
+          </div>
+          <label class="visually-hidden" for="table-text">Isi tabel</label>
+          <textarea id="table-text" rows="5" spellcheck="false" placeholder="Salin sel dari Excel lalu tempel di sini"></textarea>
+          <label class="check"><input id="has-header" type="checkbox" checked> Baris pertama adalah judul kolom</label>
+          <div class="grid2">
+            <label>Kolom untuk folder
+              <select id="folder-col"></select>
+            </label>
+            <label>Kolom untuk nama berkas
+              <select id="name-col"></select>
+            </label>
+          </div>
+          <div id="preview-wrap" class="preview" hidden>
+            <table id="preview"></table>
+          </div>
+        </div>
+
+        <label>Folder tujuan
+          <div class="row">
+            <output id="outdir" class="path"></output>
+            <button id="choose-dir" type="button">Pilih folder</button>
+          </div>
+        </label>
+
+        <button id="build" type="button" class="primary">Buat antrean</button>
+        <p id="build-state" class="state" role="status" aria-live="polite"></p>
+      </section>
+    </div>
+
+    <section class="queue" aria-labelledby="h-queue">
+      <h2 id="h-queue">3. Antrean pindai</h2>
+      <div class="queue-bar">
+        <p id="summary" class="summary">Antrean kosong</p>
+        <div class="row">
+          <button id="scan-next" type="button" class="primary" disabled>Pindai berikutnya</button>
+          <button id="open-dir" type="button">Buka folder tujuan</button>
+        </div>
+        <label class="check"><input id="auto" type="checkbox"> Lanjut otomatis ke berkas berikutnya (cocok untuk ADF)</label>
+      </div>
+      <p id="queue-state" class="state" role="status" aria-live="polite">Antrean kosong. Isi daftar berkas, lalu klik "Buat antrean".</p>
+      <ol id="queue" class="queue-list"></ol>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
