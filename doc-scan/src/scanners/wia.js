@@ -97,19 +97,39 @@ async function ensureScript() {
   return scriptPath;
 }
 
+function powershellCandidates() {
+  const root = process.env.SystemRoot || process.env.windir || 'C:\\Windows';
+  return [
+    path.join(root, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+    'powershell.exe',
+    'pwsh.exe',
+  ];
+}
+
+function execFirst(candidates, args, options) {
+  return new Promise((resolve, reject) => {
+    const attempt = (i) => {
+      if (i >= candidates.length) {
+        reject(new Error('PowerShell tidak ditemukan di komputer ini. Pemindai USB (WIA) membutuhkan Windows PowerShell.'));
+        return;
+      }
+      execFile(candidates[i], args, options, (err, stdout, stderr) => {
+        if (err && err.code === 'ENOENT') attempt(i + 1);
+        else if (err) reject(new Error((stderr || err.message).trim()));
+        else resolve(stdout);
+      });
+    };
+    attempt(0);
+  });
+}
+
 async function run(args, timeout) {
   const file = await ensureScript();
-  return new Promise((resolve, reject) => {
-    execFile(
-      'powershell.exe',
-      ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', file, ...args],
-      { timeout, windowsHide: true, maxBuffer: 1024 * 1024 },
-      (err, stdout, stderr) => {
-        if (err) reject(new Error((stderr || err.message).trim()));
-        else resolve(stdout);
-      },
-    );
-  });
+  return execFirst(
+    powershellCandidates(),
+    ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', file, ...args],
+    { timeout, windowsHide: true, maxBuffer: 1024 * 1024 },
+  );
 }
 
 async function list() {
@@ -133,4 +153,4 @@ async function scan(scanner, { source, dpi, color }) {
   }
 }
 
-module.exports = { list, scan };
+module.exports = { list, scan, execFirst, powershellCandidates };
